@@ -56,21 +56,33 @@ use constant {
     PACKET_SIZE		=> 300,
 
     # DHCP Options
-    OPTION_MASK		=> 1,
-    OPTION_ROUTER	=> 3,
-    OPTION_DNS		=> 6,
-    OPTION_HOSTNAME	=> 12,
-    OPTION_DOMAIN	=> 15,
-    OPTION_BROADCAST	=> 28,
-    OPTION_NTP		=> 42,
-    OPTION_REQUEST_IP	=> 50,
-    OPTION_LEASE_TIME	=> 51,
-    OPTION_TYPE		=> 53,
-    OPTION_SERVER	=> 54,
-    OPTION_REQUEST_LIST	=> 55,
-    OPTION_MESSAGE	=> 56,
-    OPTION_RENEWAL_TIME	=> 58,
-    OPTION_REBIND_TIME	=> 59,
+    OPTION_MASK		=>   1,
+    OPTION_ROUTER	=>   3,
+    OPTION_DNS		=>   6,
+    OPTION_HOSTNAME	=>  12,
+    OPTION_FORWARDING	=>  19,
+    OPTION_DOMAIN	=>  15,
+    OPTION_TTL		=>  23,
+    OPTION_BROADCAST	=>  28,
+    OPTION_NTP		=>  42,
+    OPTION_REQUEST_IP	=>  50,
+    OPTION_LEASE_TIME	=>  51,
+    OPTION_TYPE		=>  53,
+    OPTION_SERVER	=>  54,
+    OPTION_REQUEST_LIST	=>  55,
+    OPTION_MESSAGE	=>  56,
+    OPTION_RENEWAL_TIME	=>  58,
+    OPTION_REBIND_TIME	=>  59,
+    OPTION_SMTP		=>  69,
+    OPTION_NNTP		=>  71,
+    OPTION_WWW		=>  72,
+    # I use 150 to set the GRUB configuration path name (semi standard)
+    OPTION_GRUB		=> 150,
+    # OPTION_PXE_LINUX	=> 208,
+    # I use 208 to send http-proxy (with 2 ports) on my home network (private)
+    OPTION_PROXY	=> 208,
+    # I use 209 to set the socks server home network (private)
+    OPTION_SOCKS	=> 209,
     OPTION_END		=> 255,
 
     TYPE_ADDR		=> 1,
@@ -80,6 +92,8 @@ use constant {
     TYPE_UINT		=> 5,
     TYPE_UINT8		=> 6,
     TYPE_UINT8S		=> 7,
+    TYPE_FLAG		=> 8,
+    TYPE_IP_PORT_PORT	=> 9,
 
     # Request list
     REQUEST_SUBNET		=>   1,
@@ -115,12 +129,19 @@ my $request_list =
 
 my %option_types = (
     OPTION_MASK()		=> [TYPE_IP, "mask"],
+    OPTION_FORWARDING()		=> [TYPE_FLAG, "forwarding"],
+    OPTION_TTL()		=> [TYPE_UINT8, "ttl", "TTL"],
     OPTION_ROUTER()		=> [TYPE_IP, "router"],
     OPTION_DNS()		=> [TYPE_IPS, "dns", "DNS"],
     OPTION_HOSTNAME()		=> [TYPE_STRING, "hostname"],
     OPTION_DOMAIN()		=> [TYPE_STRING, "domain"],
     OPTION_BROADCAST()		=> [TYPE_IP, "braodcast"],
+    OPTION_SMTP()		=> [TYPE_IPS, "smtp", "SMTP"],
+    OPTION_GRUB()		=> [TYPE_STRING, "grub"],
     OPTION_NTP()		=> [TYPE_IPS, "ntp", "NTP"],
+    OPTION_NNTP()		=> [TYPE_IPS, "nntp", "NNTP"],
+    OPTION_WWW()		=> [TYPE_IPS, "www", "WWW"],
+    OPTION_PROXY()		=> [TYPE_IP_PORT_PORT, "proxy"],
     OPTION_REQUEST_IP()		=> [TYPE_IP, "client_address"],
     OPTION_LEASE_TIME()		=> [TYPE_UINT, "lease_time"],
     OPTION_TYPE()		=> [TYPE_UINT8, "reply_type", ""],
@@ -223,6 +244,10 @@ EOF
                 if ($otype == TYPE_IP) {
                     length $value == 4 || die "Unexpected $name length";
                     $option{$name} = inet_ntoa($value);
+                } elsif ($otype == TYPE_IP_PORT_PORT) {
+                    length $value == 8 || die "Unexpected $name length";
+                    my ($addr, $p1, $p2) = unpack("a4nn", $value);
+                    $option{$name} = [inet_ntoa($addr), $p1, $p2];
                 } elsif ($otype == TYPE_IPS) {
                     length($value) % 4 == 0 || die "Unexpected $name length";
                     $option{$name} = [map inet_ntoa($_), unpack("(a4)*", $value)];
@@ -237,6 +262,12 @@ EOF
                 } elsif ($otype == TYPE_UINT8) {
                     length $value == 1 || die "Unexpected $name length";
                     $option{$name} = unpack("W", $value);
+                } elsif ($otype == TYPE_FLAG) {
+                    length $value == 1 || die "Unexpected $name length";
+                    $option{$name} =
+                        $value eq "\x0" ? 0 :
+                        $value eq "\x1" ? 1 :
+                        die "Invalid $name flag value";
                 } else {
                     die "Assertion: Unimplemented option type $option_type->[0]";
                 }
