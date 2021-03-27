@@ -3,7 +3,7 @@ use strict;
 use warnings;
 
 use Socket
-    qw(pack_sockaddr_in inet_aton
+    qw(pack_sockaddr_in inet_aton inet_ntoa
        PF_INET SOCK_DGRAM SOL_SOCKET SO_REUSEADDR INADDR_ANY INADDR_BROADCAST
        SO_BROADCAST);
 
@@ -13,37 +13,48 @@ my $interface = "eno1";
 my $xid = "ABCD";
 my $mac = "\x00\x25\x90\xa2\xcf\xe4";
 my $hostname = "spiffyiron";
-my $client_addr = "10.253.0.8";
-my $gateway_addr = "0.0.0.0";
+my $client_ip = "10.253.0.8";
+my $gateway_ip = "0.0.0.0";
 
 use constant {
     SO_BINDTODEVICE	=> 25,
 
     COOKIE		=> 0x63825363,
     DISCOVER		=> "\x01",
+    OFFER		=> "\x02",
     FLAG_BROADCAST	=> 0x8000,
     PACKET_SIZE		=> 300,
 
     # DHCP Options
-    OPTION_TYPE		=> 53,
+    OPTION_MASK		=> 1,
+    OPTION_ROUTER	=> 3,
+    OPTION_DNS		=> 6,
     OPTION_HOSTNAME	=> 12,
+    OPTION_DOMAIN	=> 15,
+    OPTION_BROADCAST	=> 28,
+    OPTION_NTP		=> 42,
+    OPTION_LEASE_TIME	=> 51,
+    OPTION_TYPE		=> 53,
+    OPTION_RENEWAL_TIME	=> 58,
+    OPTION_REBIND_TIME	=> 59,
+    OPTION_SERVER	=> 54,
     OPTION_REQUEST_LIST	=> 55,
     OPTION_END		=> 255,
 
     # Request list
     REQUEST_SUBNET	=> 1,
-    REQUEST_BROADCAST	=> 28,
     REQUEST_TIME	=> 2,
     REQUEST_ROUTER	=> 3,
-    REQUEST_DOMAIN	=> 15,
-    REQUEST_DOMAIN_SEARCH	=> 119,
     REQUEST_DNS		=> 6,
     REQUEST_HOSTNAME	=> 12,
+    REQUEST_DOMAIN	=> 15,
+    REQUEST_BROADCAST	=> 28,
+    REQUEST_NTP		=> 42,
     REQUEST_NETBIOS_NS	=> 44,
     REQUEST_NETBIOS_SCOPE	=> 47,
     REQUEST_MTU		=> 26,
+    REQUEST_DOMAIN_SEARCH	=> 119,
     REQUEST_ROUTE_STATIC	=> 121,
-    REQUEST_NTP		=> 42,
 };
 
 my $request_list =
@@ -68,6 +79,12 @@ my $bootpc = getservbyname("bootpc", "udp") // 68;
 
 socket(my $sender, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
     die "Could not create socket: $^E";
+
+# Autoflush $sender
+my $fh = select($sender);
+$|=1;
+select($fh);
+
 setsockopt($sender, SOL_SOCKET, SO_REUSEADDR, 1) ||
     die "Could not setsockopt SO_REUSEADDR: $^E";
 setsockopt($sender, SOL_SOCKET, SO_BROADCAST, 1) ||
@@ -76,7 +93,7 @@ setsockopt($sender, SOL_SOCKET, SO_BINDTODEVICE, pack("Z*", $interface)) ||
     die "Could not setsockopt SO_BINDTODEVICE: $^E";
 my $from = pack_sockaddr_in($bootpc, INADDR_ANY);
 my $to   = pack_sockaddr_in($bootps, INADDR_BROADCAST);
-bind($sender, $from) or die "Could not bind: $^E";
+# bind($sender, $from) or die "Could not bind: $^E";
 connect($sender, $to) or die "Could not connect: $^E";
 my $buffer = pack("CCCCa4nnx4x4x4a4a16x192NCC/a*CC/a*CC/a*C",
 		  1,			# Boot request
@@ -86,7 +103,7 @@ my $buffer = pack("CCCCa4nnx4x4x4a4a16x192NCC/a*CC/a*CC/a*C",
 		  $xid,
 		  0,			# secs
 		  FLAG_BROADCAST,	# flags
-		  inet_aton($gateway_addr),
+		  inet_aton($gateway_ip),
 		  $mac,
 		  COOKIE,
 		  OPTION_TYPE, DISCOVER,
@@ -99,13 +116,90 @@ die "Packet too long" if $pad < 0;
 $buffer .= "\x0" x $pad;
 print $sender $buffer;
 
-if (0) {
-    socket(my $recv, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
-        die "Could not create socket: $^E";
-    setsockopt($recv, SOL_SOCKET, SO_BROADCAST, 1) ||
-        die "Could not setsockopt SO_BROADCAST: $^E";
-    bind($recv, $from) or die "Could not bind: $^E";
+socket(my $recv, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
+    die "Could not create socket: $^E";
+setsockopt($recv, SOL_SOCKET, SO_BROADCAST, 1) ||
+    die "Could not setsockopt SO_BROADCAST: $^E";
+bind($recv, $from) or die "Could not bind: $^E";
 
-    my $rc = sysread($recv, $buffer, 2**16);
-    print "$rc\n";
+my $rc = sysread($recv, $buffer, 2**16);
+print "Reply length $rc\n";
+my ($op, $hw_type, $hw_len, $hops,
+    $reply_xid, $secs, $flags,
+    $client_addr, $your_addr, $server_addr, $gateway_addr,
+    $hw_addr, $cookie,$options)
+    = unpack("W4a4nna4a4a4a4a16x192Na*", $buffer);
+$cookie == COOKIE || die "Invalid cookie $cookie";
+$reply_xid eq $xid || die "Inconsistent xid: $reply_xid vs $xid";
+my $c_ip = inet_ntoa($client_addr);
+my $y_ip = inet_ntoa($your_addr);
+my $s_ip = inet_ntoa($server_addr);
+my $g_ip = inet_ntoa($gateway_addr);
+$hw_addr = substr($hw_addr, 0, $hw_len);
+my $hw = unpack("H*", $hw_addr);
+$hw =~ s/(..)\B/$1:/g;
+print <<"EOF"
+op=$op, hw_type=$hw_type, hw_len=$hw_len, hops=$hops
+xid=$xid secs=$secs, flags=$flags
+client IP $c_ip
+Your   IP $y_ip
+Server IP $s_ip
+Gate   IP $g_ip
+MAC $hw
+EOF
+    ;
+my %option;
+while ($options ne "") {
+    my $type = ord substr($options, 0, 1, "");
+    next if $type == 0;
+    last if $type == OPTION_END;
+    my ($value, $pos) = unpack("W/a*.", $options);
+    if ($type == OPTION_TYPE) {
+        $option{reply_type} = $value;
+    } elsif ($type == OPTION_REBIND_TIME) {
+        length $value == 4 || die "Unexpected REBIND_TIME length";
+        $option{rebind_time} = unpack("N", $value);
+        print "Rebind Time: $option{rebind_time}\n";
+    } elsif ($type == OPTION_RENEWAL_TIME) {
+        length $value == 4 || die "Unexpected RENEWAL_TIME length";
+        $option{renewal_time} = unpack("N", $value);
+        print "Renewal Time: $option{renewal_time}\n";
+    } elsif ($type == OPTION_LEASE_TIME) {
+        length $value == 4 || die "Unexpected LEASE_TIME length";
+        $option{lease_time} = unpack("N", $value);
+        print "Lease Time: $option{lease_time}\n";
+    } elsif ($type == OPTION_MASK) {
+        length $value == 4 || die "Unexpected MASK length";
+        $option{mask} = inet_ntoa($value);
+        print "Mask: $option{mask}\n";
+    } elsif ($type == OPTION_BROADCAST) {
+        length $value == 4 || die "Unexpected braodcast length";
+        $option{broadcast} = inet_ntoa($value);
+        print "Broadcast: $option{broadcast}\n";
+    } elsif ($type == OPTION_ROUTER) {
+        length $value == 4 || die "Unexpected ROUTER length";
+        $option{router} = inet_ntoa($value);
+        print "Router: $option{router}\n";
+    } elsif ($type == OPTION_NTP) {
+        # Probably needs a loop to handle multiple NTP instead
+        length $value == 4 || die "Unexpected NTP length";
+        $option{ntp} = inet_ntoa($value);
+        print "NTP: $option{ntp}\n";
+    } elsif ($type == OPTION_DNS) {
+        # Probably needs a loop to handle multiple DNS instead
+        length $value == 4 || die "Unexpected DNS length";
+        $option{dns} = inet_ntoa($value);
+        print "DNS: $option{dns}\n";
+    } elsif ($type == OPTION_DOMAIN) {
+        $option{domain} = $value;
+        print "Domain: $option{domain}:\n";
+    } elsif ($type == OPTION_SERVER) {
+        $server_addr eq $value || die "Inconsistent server";
+    } else {
+        $value = unpack("H*", $value);
+        print "Option $type: $value\n";
+    }
+    substr($options, 0, $pos, "");
 }
+exists $option{reply_type} || die "No reply type";
+$option{reply_type} eq OFFER || die "Unexpected reply type";
