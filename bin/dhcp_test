@@ -10,8 +10,8 @@ use Socket
 use Sys::Hostname qw(hostname);
 
 # Client chosen ID to match answers
-# my $xid = "ABCD";
-my $xid = "41.42.43.44";
+# my $xid = "41.42.43.44";
+my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
 my $mac = "00:25:90:a2:cf:e4";
 my $hostname = hostname();
 my $client_ip = "10.253.0.8";
@@ -23,11 +23,18 @@ die "Could not parse your command line. Try $0 -h\n" unless
                "i|interface=s"	=> \my $interface,
                "m|mac=s"	=> \$mac,
                "H|hostname=s"	=> \$hostname,
+               # do DHCP relay request. Answer is on port 67. Not supported yet
                "g|gateway=s"	=> \my $gateway_ip,
+               # Do not broadcast but send to specific DHCP server
                "s|server=s"	=> \my $server_ip,
+               # Only accept answer from specific DHCP server
+               "e|expect=s"	=> \my $expect_ip,
                "version!"	=> \my $version,
                "U|unsafe!"	=> \my $unsafe,
                "h|help!"	=> \my $help);
+my $expect_addr = defined $expect_ip ?
+    inet_aton($expect_ip) || die("Cannot parse $expect_ip") :
+    undef;
 $xid = unpack("N", inet_aton($xid));
 my @mac = map hex, split /:/, $mac;
 @mac == 6 || die "Invalid MAC length";
@@ -66,6 +73,14 @@ use constant {
     OPTION_REBIND_TIME	=> 59,
     OPTION_END		=> 255,
 
+    TYPE_ADDR		=> 1,
+    TYPE_IP		=> 2,
+    TYPE_IPS		=> 3,
+    TYPE_STRING		=> 4,
+    TYPE_UINT		=> 5,
+    TYPE_UINT8		=> 6,
+    TYPE_UINT8S		=> 7,
+
     # Request list
     REQUEST_SUBNET		=>   1,
     REQUEST_TIME		=>   2,
@@ -97,6 +112,24 @@ my $request_list =
          REQUEST_MTU,
          REQUEST_ROUTE_STATIC,
          REQUEST_NTP);
+
+my %option_types = (
+    OPTION_MASK()		=> [TYPE_IP, "mask"],
+    OPTION_ROUTER()		=> [TYPE_IP, "router"],
+    OPTION_DNS()		=> [TYPE_IPS, "dns", "DNS"],
+    OPTION_HOSTNAME()		=> [TYPE_STRING, "hostname"],
+    OPTION_DOMAIN()		=> [TYPE_STRING, "domain"],
+    OPTION_BROADCAST()		=> [TYPE_IP, "braodcast"],
+    OPTION_NTP()		=> [TYPE_IPS, "ntp", "NTP"],
+    OPTION_REQUEST_IP()		=> [TYPE_IP, "client_address"],
+    OPTION_LEASE_TIME()		=> [TYPE_UINT, "lease_time"],
+    OPTION_TYPE()		=> [TYPE_UINT8, "reply_type", ""],
+    OPTION_SERVER()		=> [TYPE_ADDR, "server", ""],
+    OPTION_REQUEST_LIST()	=> [TYPE_UINT8S, "request_list"],
+    OPTION_MESSAGE()		=> [TYPE_STRING, "message"],
+    OPTION_RENEWAL_TIME()	=> [TYPE_UINT, "renewal_time"],
+    OPTION_REBIND_TIME()	=> [TYPE_UINT, "renewal_time"],
+);
 
 my $PROTO_UDP = getprotobyname("udp") // 17;
 my $bootps = getservbyname("bootps", "udp") // 67;
@@ -134,36 +167,38 @@ sub packet_build {
 sub packet_receive {
     my ($socket) = @_;
 
-    my $rc = sysread($socket, my $buffer, int(2**16));
-    defined $rc || die "Could not sysread: $^E";
-    $rc || die "Assertion: Empty sysread";
-    # print "Reply length $rc\n";
+    while (1) {
+        my $rc = sysread($socket, my $buffer, int(2**16));
+        defined $rc || die "Could not sysread: $^E";
+        $rc || die "Assertion: Empty sysread";
+        # print "Reply length $rc\n";
 
-    my ($op, $hw_type, $hw_len, $hops,
-        $reply_xid, $secs, $flags,
-        $client_addr, $your_addr, $server_addr, $gateway_addr,
-        $hw_addr, $cookie,$options)
-        = unpack("W4Nnna4a4a4a4a16x192Na*", $buffer);
-    $op == 2 || die "Unexpected boot reply type $op";
-    $cookie == COOKIE || die "Invalid cookie $cookie";
-    $reply_xid == $xid || die "Inconsistent xid: $reply_xid vs $xid";
-    my %option = (
-        xid		=> $reply_xid,
-        xid_ip		=> inet_ntoa(pack("N", $reply_xid)),
-        client_addr	=> $client_addr,
-        your_addr	=> $your_addr,
-        server_addr	=> $server_addr,
-        gateway_addr	=> $gateway_addr,
-    );
-    defined $options || die "Truncated DHCP reply";
-    $option{client_ip} = inet_ntoa($client_addr);
-    $option{your_ip} = inet_ntoa($your_addr);
-    $option{server_ip} = inet_ntoa($server_addr);
-    $option{gateway_ip} = inet_ntoa($gateway_addr);
-    $option{hw_addr} = substr($hw_addr, 0, $hw_len);
-    my $hw = unpack("H*", $option{hw_addr});
-    $hw =~ s/(..)\B/$1:/g;
-    print <<"EOF" if $verbose
+        my ($op, $hw_type, $hw_len, $hops,
+            $reply_xid, $secs, $flags,
+            $client_addr, $your_addr, $server_addr, $gateway_addr,
+            $hw_addr, $cookie,$options)
+            = unpack("W4Nnna4a4a4a4a16x192Na*", $buffer);
+        $op == 2 || die "Unexpected boot reply type $op";
+        $cookie == COOKIE || next;
+        $reply_xid == $xid || next;
+        !$expect_addr || $server_addr eq $expect_addr || next;
+        my %option = (
+            xid		=> $reply_xid,
+            xid_ip	=> inet_ntoa(pack("N", $reply_xid)),
+            client_addr	=> $client_addr,
+            your_addr	=> $your_addr,
+            server_addr	=> $server_addr,
+            gateway_addr=> $gateway_addr,
+        );
+        defined $options || die "Truncated DHCP reply";
+        $option{client_ip} = inet_ntoa($client_addr);
+        $option{your_ip} = inet_ntoa($your_addr);
+        $option{server_ip} = inet_ntoa($server_addr);
+        $option{gateway_ip} = inet_ntoa($gateway_addr);
+        $option{hw_addr} = substr($hw_addr, 0, $hw_len);
+        my $hw = unpack("H*", $option{hw_addr});
+        $hw =~ s/(..)\B/$1:/g;
+        print <<"EOF" if $verbose
 $separator
 op=$op, hw_type=$hw_type, hw_len=$hw_len, hops=$hops
 xid=$option{xid_ip} secs=$secs, flags=$flags
@@ -173,66 +208,56 @@ Server IP $option{server_ip}
 Gate   IP $option{gateway_ip}
 MAC $hw
 EOF
-        ;
-    while ($options ne "") {
-        my $type = ord substr($options, 0, 1, "");
-        next if $type == 0;
-        last if $type == OPTION_END;
-        my ($value, $pos) = unpack("W/a*.", $options);
-        if ($type == OPTION_TYPE) {
-            length $value == 1 || die "Unexpected DHCP message type length";
-            $option{reply_type} = unpack("W", $value);
-        } elsif ($type == OPTION_REBIND_TIME) {
-            length $value == 4 || die "Unexpected REBIND_TIME length";
-            $option{rebind_time} = unpack("N", $value);
-            print "Rebind Time: $option{rebind_time}\n" if $verbose;
-        } elsif ($type == OPTION_RENEWAL_TIME) {
-            length $value == 4 || die "Unexpected RENEWAL_TIME length";
-            $option{renewal_time} = unpack("N", $value);
-            print "Renewal Time: $option{renewal_time}\n" if $verbose;
-        } elsif ($type == OPTION_LEASE_TIME) {
-            length $value == 4 || die "Unexpected LEASE_TIME length";
-            $option{lease_time} = unpack("N", $value);
-            print "Lease Time: $option{lease_time}\n" if $verbose;
-        } elsif ($type == OPTION_MASK) {
-            length $value == 4 || die "Unexpected MASK length";
-            $option{mask} = inet_ntoa($value);
-            print "Mask: $option{mask}\n" if $verbose;
-        } elsif ($type == OPTION_BROADCAST) {
-            length $value == 4 || die "Unexpected braodcast length";
-            $option{broadcast} = inet_ntoa($value);
-            print "Broadcast: $option{broadcast}\n" if $verbose;
-        } elsif ($type == OPTION_ROUTER) {
-            length $value == 4 || die "Unexpected ROUTER length";
-            $option{router} = inet_ntoa($value);
-            print "Router: $option{router}\n" if $verbose;
-        } elsif ($type == OPTION_NTP) {
-            # Probably needs a loop to handle multiple NTP instead
-            length($value) % 4 == 0 || die "Unexpected NTP length";
-            $option{ntp} = [map inet_ntoa($_), unpack("(a4)*", $value)];
-            print "NTP: @{$option{ntp}}\n" if $verbose;
-        } elsif ($type == OPTION_DNS) {
-            # Probably needs a loop to handle multiple DNS instead
-            length($value) % 4 == 0 || die "Unexpected DNS length";
-            $option{dns} = [map inet_ntoa($_), unpack("(a4)*", $value)];
-            print "DNS: @{$option{dns}}\n" if $verbose;
-        } elsif ($type == OPTION_DOMAIN) {
-            $option{domain} = $value;
-            print "Domain: $option{domain}:\n" if $verbose;
-        } elsif ($type == OPTION_SERVER) {
-            $server_addr eq $value || die "Inconsistent server";
-            $option{server} = $value;
-        } elsif ($type == OPTION_MESSAGE) {
-            $option{message} = $value;
-            print "Message: $option{message}:\n" if $verbose;
-        } else {
-            $value = unpack("H*", $value);
-            print "Option $type: $value\n" if $verbose;
+            ;
+        while ($options ne "") {
+            my $type = ord substr($options, 0, 1, "");
+            next if $type == 0;
+            last if $type == OPTION_END;
+            my ($value, $pos) = unpack("W/a*.", $options);
+            if (my $option_type = $option_types{$type}) {
+                my ($otype, $name, $disply_name) = @$option_type;
+                if (!defined $disply_name) {
+                    $disply_name = ucfirst($name);
+                    $disply_name =~ s/_(.)/ \u$1/g;
+                }
+                if ($otype == TYPE_IP) {
+                    length $value == 4 || die "Unexpected $name length";
+                    $option{$name} = inet_ntoa($value);
+                } elsif ($otype == TYPE_IPS) {
+                    length($value) % 4 == 0 || die "Unexpected $name length";
+                    $option{$name} = [map inet_ntoa($_), unpack("(a4)*", $value)];
+                } elsif ($otype == TYPE_ADDR) {
+                    length $value == 4 || die "Unexpected $name length";
+                    $option{$name} = $value;
+                } elsif ($otype == TYPE_STRING) {
+                    $option{$name} = $value;
+                } elsif ($otype == TYPE_UINT) {
+                    length $value == 4 || die "Unexpected $name length";
+                    $option{$name} = unpack("N", $value);
+                } elsif ($otype == TYPE_UINT8) {
+                    length $value == 1 || die "Unexpected $name length";
+                    $option{$name} = unpack("W", $value);
+                } else {
+                    die "Assertion: Unimplemented option type $option_type->[0]";
+                }
+                if ($verbose && $disply_name ne "") {
+                    if (ref $option{$name} eq "ARRAY") {
+                        print "$disply_name: @{$option{$name}}\n";
+                    } else {
+                        print "$disply_name: $option{$name}\n";
+                    }
+                }
+            } else {
+                $value = unpack("H*", $value);
+                print "Option $type: $value\n" if $verbose;
+            }
+            substr($options, 0, $pos, "");
         }
-        substr($options, 0, $pos, "");
+        !exists $option{server} || $option{server} eq $server_addr ||
+            die "Inconsistent server";
+        exists $option{reply_type} || die "No reply type";
+        return \%option;
     }
-    exists $option{reply_type} || die "No reply type";
-    return \%option;
 }
 
 socket(my $sender, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
