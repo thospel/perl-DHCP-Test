@@ -1,3 +1,111 @@
 #!/usr/bin/perl -w
 use strict;
 use warnings;
+
+use Socket
+    qw(pack_sockaddr_in inet_aton
+       PF_INET SOCK_DGRAM SOL_SOCKET SO_REUSEADDR INADDR_ANY INADDR_BROADCAST
+       SO_BROADCAST);
+
+my $interface = "eno1";
+
+# Client chosen ID to match answers
+my $xid = "ABCD";
+my $mac = "\x00\x25\x90\xa2\xcf\xe4";
+my $hostname = "spiffyiron";
+my $client_addr = "10.253.0.8";
+my $gateway_addr = "0.0.0.0";
+
+use constant {
+    SO_BINDTODEVICE	=> 25,
+
+    COOKIE		=> 0x63825363,
+    DISCOVER		=> "\x01",
+    FLAG_BROADCAST	=> 0x8000,
+    PACKET_SIZE		=> 300,
+
+    # DHCP Options
+    OPTION_TYPE		=> 53,
+    OPTION_HOSTNAME	=> 12,
+    OPTION_REQUEST_LIST	=> 55,
+    OPTION_END		=> 255,
+
+    # Request list
+    REQUEST_SUBNET	=> 1,
+    REQUEST_BROADCAST	=> 28,
+    REQUEST_TIME	=> 2,
+    REQUEST_ROUTER	=> 3,
+    REQUEST_DOMAIN	=> 15,
+    REQUEST_DOMAIN_SEARCH	=> 119,
+    REQUEST_DNS		=> 6,
+    REQUEST_HOSTNAME	=> 12,
+    REQUEST_NETBIOS_NS	=> 44,
+    REQUEST_NETBIOS_SCOPE	=> 47,
+    REQUEST_MTU		=> 26,
+    REQUEST_ROUTE_STATIC	=> 121,
+    REQUEST_NTP		=> 42,
+};
+
+my $request_list =
+    pack("C*",
+         REQUEST_SUBNET,
+         REQUEST_BROADCAST,
+         REQUEST_TIME,
+         REQUEST_ROUTER,
+         REQUEST_DOMAIN,
+         REQUEST_DNS,
+         REQUEST_DOMAIN_SEARCH,
+         REQUEST_HOSTNAME,
+         REQUEST_NETBIOS_NS,
+         REQUEST_NETBIOS_SCOPE,
+         REQUEST_MTU,
+         REQUEST_ROUTE_STATIC,
+         REQUEST_NTP);
+
+my $PROTO_UDP = getprotobyname("udp") // 17;
+my $bootps = getservbyname("bootps", "udp") // 67;
+my $bootpc = getservbyname("bootpc", "udp") // 68;
+
+socket(my $sender, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
+    die "Could not create socket: $^E";
+setsockopt($sender, SOL_SOCKET, SO_REUSEADDR, 1) ||
+    die "Could not setsockopt SO_REUSEADDR: $^E";
+setsockopt($sender, SOL_SOCKET, SO_BROADCAST, 1) ||
+    die "Could not setsockopt SO_BROADCAST: $^E";
+setsockopt($sender, SOL_SOCKET, SO_BINDTODEVICE, pack("Z*", $interface)) ||
+    die "Could not setsockopt SO_BINDTODEVICE: $^E";
+my $from = pack_sockaddr_in($bootpc, INADDR_ANY);
+my $to   = pack_sockaddr_in($bootps, INADDR_BROADCAST);
+bind($sender, $from) or die "Could not bind: $^E";
+connect($sender, $to) or die "Could not connect: $^E";
+my $buffer = pack("CCCCa4nnx4x4x4a4a16x192NCC/a*CC/a*CC/a*C",
+		  1,			# Boot request
+		  1,			# Hardware type (ethernet)
+		  6,			# Hardware addr length (6 bytes) <= 16
+		  0,			# Max Hops
+		  $xid,
+		  0,			# secs
+		  FLAG_BROADCAST,	# flags
+		  inet_aton($gateway_addr),
+		  $mac,
+		  COOKIE,
+		  OPTION_TYPE, DISCOVER,
+		  OPTION_HOSTNAME, $hostname,
+		  OPTION_REQUEST_LIST, $request_list,
+		  OPTION_END
+	      );
+my $pad = PACKET_SIZE - length $buffer;
+die "Packet too long" if $pad < 0;
+$buffer .= "\x0" x $pad;
+print $sender $buffer;
+
+if (0) {
+    socket(my $recv, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
+        die "Could not create socket: $^E";
+    setsockopt($recv, SOL_SOCKET, SO_BROADCAST, 1) ||
+        die "Could not setsockopt SO_BROADCAST: $^E";
+    bind($recv, $from) or die "Could not bind: $^E";
+
+    my $rc = sysread($recv, $buffer, 2**16);
+    print "$rc\n";
+}
