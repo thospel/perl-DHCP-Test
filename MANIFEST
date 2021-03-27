@@ -1,0 +1,9 @@
+Changes
+MANIFEST
+Makefile.PL
+README
+bin/dhcp_test
+lib/DHCP/Test/Package.pm
+t/00_syntax.t
+md5-versions
+version_check
