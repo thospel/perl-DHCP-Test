@@ -107,7 +107,7 @@ sub packet_build {
     my @options = (
         OPTION_TYPE, pack("W", $type),
         OPTION_HOSTNAME, $hostname,
-        OPTION_REQUEST_LIST, $request_list,
+        # OPTION_REQUEST_LIST, $request_list,
     );
     push @options, OPTION_REQUEST_IP, $client_address if $client_address;
     push @options, OPTION_SERVER,     $server_address if $server_address;
@@ -208,14 +208,14 @@ EOF
             print "Router: $option{router}\n" if $verbose;
         } elsif ($type == OPTION_NTP) {
             # Probably needs a loop to handle multiple NTP instead
-            length $value == 4 || die "Unexpected NTP length";
-            $option{ntp} = inet_ntoa($value);
-            print "NTP: $option{ntp}\n" if $verbose;
+            length($value) % 4 == 0 || die "Unexpected NTP length";
+            $option{ntp} = [map inet_ntoa($_), unpack("(a4)*", $value)];
+            print "NTP: @{$option{ntp}}\n" if $verbose;
         } elsif ($type == OPTION_DNS) {
             # Probably needs a loop to handle multiple DNS instead
-            length $value == 4 || die "Unexpected DNS length";
-            $option{dns} = inet_ntoa($value);
-            print "DNS: $option{dns}\n" if $verbose;
+            length($value) % 4 == 0 || die "Unexpected DNS length";
+            $option{dns} = [map inet_ntoa($_), unpack("(a4)*", $value)];
+            print "DNS: @{$option{dns}}\n" if $verbose;
         } elsif ($type == OPTION_DOMAIN) {
             $option{domain} = $value;
             print "Domain: $option{domain}:\n" if $verbose;
