@@ -185,6 +185,69 @@ sub packet_build {
     return $buffer . "\x0" x $pad;
 }
 
+sub parse_options {
+    my ($options, $string) = @_;
+
+    my %accu;
+    while ($string ne "") {
+        my $type = ord substr($string, 0, 1, "");
+        next if $type == 0;
+        last if $type == OPTION_END;
+        my ($value, $pos) = unpack("W/a*.", $string);
+        $accu{$type} = exists $accu{$type} ? $accu{$type} . $value : $value;
+        substr($string, 0, $pos, "");
+    }
+    while (my ($type, $value) = each %accu) {
+        if (my $option_type = $option_types{$type}) {
+            my ($otype, $name, $disply_name) = @$option_type;
+            if (!defined $disply_name) {
+                $disply_name = ucfirst($name);
+                $disply_name =~ s/_(.)/ \u$1/g;
+            }
+            if ($otype == TYPE_IP) {
+                length $value == 4 || die "Unexpected $name length";
+                $options->{$name} = inet_ntoa($value);
+            } elsif ($otype == TYPE_IP_PORT_PORT) {
+                length $value == 8 || die "Unexpected $name length";
+                my ($addr, $p1, $p2) = unpack("a4nn", $value);
+                $options->{$name} = [inet_ntoa($addr), $p1, $p2];
+            } elsif ($otype == TYPE_IPS) {
+                length($value) % 4 == 0 || die "Unexpected $name length";
+                $options->{$name} = [map inet_ntoa($_), unpack("(a4)*", $value)];
+            } elsif ($otype == TYPE_ADDR) {
+                length $value == 4 || die "Unexpected $name length";
+                $options->{$name} = $value;
+            } elsif ($otype == TYPE_STRING) {
+                $options->{$name} = $value;
+            } elsif ($otype == TYPE_UINT) {
+                length $value == 4 || die "Unexpected $name length";
+                $options->{$name} = unpack("N", $value);
+            } elsif ($otype == TYPE_UINT8) {
+                length $value == 1 || die "Unexpected $name length";
+                $options->{$name} = unpack("W", $value);
+            } elsif ($otype == TYPE_FLAG) {
+                length $value == 1 || die "Unexpected $name length";
+                $options->{$name} =
+                    $value eq "\x0" ? 0 :
+                    $value eq "\x1" ? 1 :
+                    die "Invalid $name flag value";
+            } else {
+                die "Assertion: Unimplemented option type $option_type->[0]";
+            }
+            if ($verbose && $disply_name ne "") {
+                if (ref $options->{$name} eq "ARRAY") {
+                    print "$disply_name: @{$options->{$name}}\n";
+                } else {
+                    print "$disply_name: $options->{$name}\n";
+                }
+            }
+        } else {
+            $value = unpack("H*", $value);
+            print "Option $type: $value\n" if $verbose;
+        }
+    }
+}
+
 sub packet_receive {
     my ($socket) = @_;
 
@@ -197,8 +260,10 @@ sub packet_receive {
         my ($op, $hw_type, $hw_len, $hops,
             $reply_xid, $secs, $flags,
             $client_addr, $your_addr, $server_addr, $gateway_addr,
-            $hw_addr, $cookie,$options)
-            = unpack("W4Nnna4a4a4a4a16x192Na*", $buffer);
+            $hw_addr,
+            $server_name, $boot_file,
+            $cookie, $options)
+            = unpack("W4Nnna4a4a4a4a16Z64Z128Na*", $buffer);
         $op == 2 || die "Unexpected boot reply type $op";
         $cookie == COOKIE || next;
         $reply_xid == $xid || next;
@@ -230,60 +295,16 @@ Gate   IP $option{gateway_ip}
 MAC $hw
 EOF
             ;
-        while ($options ne "") {
-            my $type = ord substr($options, 0, 1, "");
-            next if $type == 0;
-            last if $type == OPTION_END;
-            my ($value, $pos) = unpack("W/a*.", $options);
-            if (my $option_type = $option_types{$type}) {
-                my ($otype, $name, $disply_name) = @$option_type;
-                if (!defined $disply_name) {
-                    $disply_name = ucfirst($name);
-                    $disply_name =~ s/_(.)/ \u$1/g;
-                }
-                if ($otype == TYPE_IP) {
-                    length $value == 4 || die "Unexpected $name length";
-                    $option{$name} = inet_ntoa($value);
-                } elsif ($otype == TYPE_IP_PORT_PORT) {
-                    length $value == 8 || die "Unexpected $name length";
-                    my ($addr, $p1, $p2) = unpack("a4nn", $value);
-                    $option{$name} = [inet_ntoa($addr), $p1, $p2];
-                } elsif ($otype == TYPE_IPS) {
-                    length($value) % 4 == 0 || die "Unexpected $name length";
-                    $option{$name} = [map inet_ntoa($_), unpack("(a4)*", $value)];
-                } elsif ($otype == TYPE_ADDR) {
-                    length $value == 4 || die "Unexpected $name length";
-                    $option{$name} = $value;
-                } elsif ($otype == TYPE_STRING) {
-                    $option{$name} = $value;
-                } elsif ($otype == TYPE_UINT) {
-                    length $value == 4 || die "Unexpected $name length";
-                    $option{$name} = unpack("N", $value);
-                } elsif ($otype == TYPE_UINT8) {
-                    length $value == 1 || die "Unexpected $name length";
-                    $option{$name} = unpack("W", $value);
-                } elsif ($otype == TYPE_FLAG) {
-                    length $value == 1 || die "Unexpected $name length";
-                    $option{$name} =
-                        $value eq "\x0" ? 0 :
-                        $value eq "\x1" ? 1 :
-                        die "Invalid $name flag value";
-                } else {
-                    die "Assertion: Unimplemented option type $option_type->[0]";
-                }
-                if ($verbose && $disply_name ne "") {
-                    if (ref $option{$name} eq "ARRAY") {
-                        print "$disply_name: @{$option{$name}}\n";
-                    } else {
-                        print "$disply_name: $option{$name}\n";
-                    }
-                }
-            } else {
-                $value = unpack("H*", $value);
-                print "Option $type: $value\n" if $verbose;
-            }
-            substr($options, 0, $pos, "");
+        parse_options(\%option, $options);
+        if ($server_name ne "") {
+            $option{server_name} = $server_name;
+            print "Server name: $server_name\n" if $verbose;
         }
+        if ($boot_file ne "") {
+            $option{boot_file} = $boot_file;
+            print "Boot File: $boot_file\n" if $verbose;
+        }
+
         !exists $option{server} || $option{server} eq $server_addr ||
             die "Inconsistent server";
         exists $option{reply_type} || die "No reply type";
