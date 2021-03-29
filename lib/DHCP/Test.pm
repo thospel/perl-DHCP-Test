@@ -8,6 +8,9 @@ use Carp;
 use Socket qw(INADDR_ANY PF_INET SOCK_DGRAM SOL_SOCKET SO_BROADCAST
               pack_sockaddr_in unpack_sockaddr_in inet_ntoa inet_aton);
 use IO::Interface::Simple;
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC );
+use Errno qw(EINTR);
+
 use constant {
     # This is the linux value. Can/will be different on a different OS
     SO_BINDTODEVICE	=> 25,
@@ -218,7 +221,7 @@ sub options_build {
 }
 
 sub packet_send {
-    my ($type, $interface, $target, $xid, $gateway_ip, $mac, %options) = @_;
+    my ($type, $interface, $target, $xid, $gateway_ip, $mac, $unicast, %options) = @_;
 
     my $ciaddr = INADDR_ANY;
     if ($type == RELEASE) {
@@ -265,8 +268,8 @@ sub packet_send {
 		      6,           # Hardware addr length (6 bytes) <= 16
 		      0,           # Max Hops
 		      $xid,
-		      0,              # secs
-                      FLAG_BROADCAST, # flags
+		      0,           # secs
+                      $unicast ? 0 : FLAG_BROADCAST,	# flags
                       $ciaddr,
                       $gateway_ip ? inet_aton($gateway_ip) : INADDR_ANY,
                       $mac,
@@ -349,9 +352,24 @@ sub options_parse {
 }
 
 sub packet_receive {
-    my ($socket, $xid, $expect_addr, $mac) = @_;
+    my ($socket, $timeout, $xid, $expect_addr, $mac) = @_;
+
+    my $read_mask  = "";
+    my $fd = fileno($socket) // die "Not a file descriptor";
+    vec($read_mask, $fd, 1) = 1;
+    my $now = clock_gettime(CLOCK_MONOTONIC);
+    my $target_time = $now + $timeout;
 
     while (1) {
+        $timeout = $target_time - $now;
+        $timeout = 0 if $timeout < 0;
+        my $rc = select(my $r = $read_mask, undef, undef, $timeout);
+        if ($rc <= 0) {
+            return undef if $rc == 0;
+            next if $! == EINTR;
+            die "Select failed: $^E";
+        }
+
         my $server = recv($socket, my $buffer, BLOCK_SIZE, 0) //
             die "Could not sysread: $^E";
         my ($server_port, $server_addr) = unpack_sockaddr_in($server) or
@@ -365,14 +383,14 @@ sub packet_receive {
             $cookie, $options)
             = unpack("W4Nnna4a4a4a4a16a64a128Na*", $buffer);
 
-        # This happens. We will at least see our own broadcast
+        # Not BOOTREPLY happens. We will at least see our own broadcast
         $op == BOOTREPLY || next;
-
         $cookie && $cookie == COOKIE || next;
         $hw_addr = substr($hw_addr, 0, $hw_len);
         $hw_addr eq $mac || next;
         printf "%s\nReply (length %d) from %s:%d for %s\n",
-            $separator, length $buffer, inet_ntoa($server_addr), $server_port, unpack("H*", $hw_addr) if $verbose;
+            $separator, length $buffer, inet_ntoa($server_addr), $server_port,
+            unpack("H*", $hw_addr) if $verbose;
         $hw_type == HW_ETHERNET || next;
         $reply_xid == $xid || next;
         !$expect_addr || $server_addr eq $expect_addr || next;
@@ -439,6 +457,8 @@ EOF
 
         exists $option{message_type} || die "No reply message type";
         return \%option;
+    } continue {
+        $now = clock_gettime(CLOCK_MONOTONIC);
     }
 }
 

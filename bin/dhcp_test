@@ -41,16 +41,20 @@ use DHCP::Test qw($verbose $separator
 # my $xid = "41.42.43.44";
 my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
 my $hostname = hostname();
-my $client_ip = "10.253.0.8";
+my $timeout = 1;
+my $retries = 4;
 
 die "Could not parse your command line. Try $0 -h\n" unless
     GetOptions("v|verbose!"	=> \$verbose,
                "xid=s"		=> \$xid,
+               "r|retries=o"	=> \$retries,
+               "t|timeout=f"	=> \$timeout,
                "i|interface=s"	=> \my $interface,
                "m|mac=s"	=> \my $mac,
                "H|hostname=s"	=> \$hostname,
                # do DHCP relay request. Answer is on port 67. Not supported yet
                "g|gateway:s"	=> \my $gateway_ip,
+               "u|unicast!"	=> \my $unicast,
                # Do not broadcast but send to specific DHCP server
                "s|server=s"	=> \my $server_ip,
                # Only accept answer from specific DHCP server
@@ -72,11 +76,6 @@ if (defined $mac) {
 my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
     die "Could not resolve $server_ip";
 
-# DISCOVER
-$mac = packet_send(DISCOVER,
-                   $interface, $server_addr, $xid, $gateway_ip, $mac,
-                   hostname => $hostname);
-
 socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
     die "Could not create socket: $^E";
 #setsockopt($recv, SOL_SOCKET, SO_BROADCAST, 1) ||
@@ -89,33 +88,63 @@ if (!bind($recv, $from)) {
     my $ip = inet_ntoa($addr);
     die "Could not bind to $ip:$port: $^E";
 }
+$recv->blocking(0);
 
-# OFFER
-my $options = packet_receive($recv, $xid, $expect_addr, $mac);
-$options->{message_type} == OFFER ||
-    die "Unexpected reply type $options->{message_type} (expected OFFER)";
+my $options1;
+for my $try (1..$retries) {
+    # DISCOVER
+    $mac = packet_send(DISCOVER,
+                       $interface, $server_addr, $xid, $gateway_ip, $mac,
+                       $unicast,
+                       hostname => $hostname);
+    print "$separator\nDISCOVER sent\n" if $verbose;
+
+    # OFFER
+    last if
+        $options1 = packet_receive($recv, $timeout, $xid, $expect_addr, $mac);
+    print "OFFER receive timed out\n" if $verbose;
+}
+if (!$options1) {
+    print "Max retries reached\n" if $verbose;
+    exit 1;
+}
+$options1->{message_type} == OFFER ||
+    die "Unexpected reply type $options1->{message_type} (expected OFFER)";
 
 $xid = int(($xid+1) % 2**32);
-# REQUEST
-packet_send(REQUEST,
-            $interface, $server_addr, $xid, $gateway_ip, $mac,
-            hostname	=> $hostname,
-            request_ip	=> $options->{your_ip},
-            server	=> $options->{server_addr});
 
-# ACK
-$options = packet_receive($recv, $xid, $options->{server}, $mac);
-$options->{message_type} == ACK ||
-    die "Unexpected reply type $options->{message_type} (expected ACK)";
+my $options2;
+for my $try (1..$retries) {
+    # REQUEST
+    packet_send(REQUEST,
+                $interface, $server_addr, $xid, $gateway_ip, $mac,
+                $unicast,
+                hostname	=> $hostname,
+                request_ip	=> $options1->{your_ip},
+                server	=> $options1->{server_addr});
+    print "$separator\nREQUEST sent\n" if $verbose;
+
+    # ACK
+    last if
+        $options2 = packet_receive($recv, $timeout, $xid, $options1->{server}, $mac);
+    print "ACK receive timed out\n" if $verbose;
+}
+if (!$options2) {
+    print "Max retries reached\n" if $verbose;
+    exit 1;
+}
+$options2->{message_type} == ACK ||
+    die "Unexpected reply type $options2->{message_type} (expected ACK)";
 print "$separator\n" if $verbose;
-print "DHCP Server $options->{server_ip} gave out $options->{your_ip}\n";
+print "DHCP Server $options2->{server_ip} gave out $options2->{your_ip}\n";
 
 if (!$keep) {
     # RELEASE
     packet_send(RELEASE,
                 $interface, $server_addr, $xid, $gateway_ip, $mac,
+                $unicast,
                 hostname	=> $hostname,
-                request_ip	=> $options->{your_ip},
-                server		=> $options->{server_addr});
-    print "And release...\n" if $verbose;
+                request_ip	=> $options2->{your_ip},
+                server		=> $options2->{server_addr});
+    print "$separator\nRELEASE sent\n" if $verbose;
 }
