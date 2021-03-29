@@ -4,6 +4,27 @@
 use strict;
 use warnings;
 
+our $VERSION = "1.000";
+
+use FindBin qw($Script);
+our $Bin;
+
+# If the program runs as /foobar/bin/program, find libraries in /foobar/lib
+BEGIN {
+    # Even on windows FindBin uses / in the reported path
+    $Bin = $FindBin::Bin;
+    $Bin =~ s{/+\z}{};
+    $Bin =~
+        ($^O eq "MSWin32" ?
+         qr{^((?:[A-Z]:)?(?:/[a-zA-Z0-9_:.~ -]+)*)/[a-zA-Z0-9_.-]+/*\z} :
+         qr{^((?:/[a-zA-Z0-9_:.-]+)*)/[a-zA-Z0-9_.-]+/*\z}) ||
+         die "Could not parse bin directory '$Bin'";
+    # Use untainted version of lib
+    require lib;
+    # Support a simple --blib option for pre-install testing
+    "lib"->import(@ARGV && $ARGV[0] eq "--blib" ? shift && "$1/blib/lib" : "$1/lib");
+}
+
 use Getopt::Long 2.24 qw(:config bundling require_order);
 use Socket
     qw(pack_sockaddr_in unpack_sockaddr_in inet_aton inet_ntoa
@@ -11,16 +32,20 @@ use Socket
        SO_BROADCAST);
 use Sys::Hostname qw(hostname);
 
+use DHCP::Test qw($verbose $separator
+                  SO_BINDTODEVICE DISCOVER OFFER REPLY ACK
+                  OPTION_HOSTNAME OPTION_REQUEST_IP OPTION_SERVER
+                  packet_build packet_receive);
+
 # Client chosen ID to match answers
 # my $xid = "41.42.43.44";
 my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
 my $mac = "00:25:90:a2:cf:e4";
 my $hostname = hostname();
 my $client_ip = "10.253.0.8";
-my $separator = "===============";
 
 die "Could not parse your command line. Try $0 -h\n" unless
-    GetOptions("v|verbose!"	=> \my $verbose,
+    GetOptions("v|verbose!"	=> \$verbose,
                "xid=s"		=> \$xid,
                "i|interface=s"	=> \my $interface,
                "m|mac=s"	=> \$mac,
@@ -45,317 +70,9 @@ $mac = pack("W*", @mac);
 my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
     die "Could not resolve $server_ip";
 
-use constant {
-    SO_BINDTODEVICE	=> 25,
-
-    HW_ETHERNET		=> 1,
-    COOKIE		=> 0x63825363,
-    DISCOVER		=> 1,
-    OFFER		=> 2,
-    REPLY		=> 3,
-    ACK			=> 5,
-    NAK			=> 6,
-    FLAG_BROADCAST	=> 0x8000,
-    PACKET_SIZE		=> 300,
-
-    # DHCP Options
-    OPTION_MASK		=>   1,
-    OPTION_TIME_OFFSET	=>   2,
-    OPTION_ROUTER	=>   3,
-    OPTION_TIME_SERVER	=>   4,
-    OPTION_DNS		=>   6,
-    OPTION_HOSTNAME	=>  12,
-    OPTION_DOMAIN	=>  15,
-    OPTION_FORWARDING	=>  19,
-    OPTION_TTL		=>  23,
-    OPTION_BROADCAST	=>  28,
-    OPTION_NTP		=>  42,
-    OPTION_REQUEST_IP	=>  50,
-    OPTION_LEASE_TIME	=>  51,
-    OPTION_OVERLOAD	=>  52,
-    OPTION_TYPE		=>  53,
-    OPTION_SERVER	=>  54,
-    OPTION_REQUEST_LIST	=>  55,
-    OPTION_MESSAGE	=>  56,
-    OPTION_SIZE_MAX	=>  57,
-    OPTION_RENEWAL_TIME	=>  58,
-    OPTION_REBIND_TIME	=>  59,
-    OPTION_BOOT_SERVER	=>  66,
-    OPTION_BOOT_FILE	=>  67,
-    OPTION_SMTP		=>  69,
-    OPTION_NNTP		=>  71,
-    OPTION_WWW		=>  72,
-    # I use 150 to set the GRUB configuration path name (semi standard)
-    OPTION_GRUB		=> 150,
-    # OPTION_PXE_LINUX	=> 208,
-    # I use 208 to send http-proxy (with 2 ports) on my home network (private)
-    OPTION_PROXY	=> 224,
-    # I use 209 to set the socks server home network (private)
-    OPTION_SOCKS	=> 225,
-    OPTION_END		=> 255,
-
-    TYPE_ADDR		=>  1,
-    TYPE_IP		=>  2,
-    TYPE_IPS		=>  3,
-    TYPE_STRING		=>  4,
-    TYPE_INT		=>  5,
-    TYPE_UINT		=>  6,
-    TYPE_UINT8		=>  7,
-    TYPE_UINT8S		=>  8,
-    TYPE_FLAG		=>  9,
-    TYPE_IP_PORT_PORT	=> 10,
-
-    # Request list
-    REQUEST_SUBNET		=>   1,
-    REQUEST_TIME		=>   2,
-    REQUEST_ROUTER		=>   3,
-    REQUEST_DNS			=>   6,
-    REQUEST_HOSTNAME		=>  12,
-    REQUEST_DOMAIN		=>  15,
-    REQUEST_BROADCAST		=>  28,
-    REQUEST_NTP			=>  42,
-    REQUEST_NETBIOS_NS		=>  44,
-    REQUEST_NETBIOS_SCOPE	=>  47,
-    REQUEST_MTU			=>  26,
-    REQUEST_DOMAIN_SEARCH	=> 119,
-    REQUEST_ROUTE_STATIC	=> 121,
-};
-
-my $request_list =
-    pack("W*",
-         REQUEST_SUBNET,
-         REQUEST_BROADCAST,
-         REQUEST_TIME,
-         REQUEST_ROUTER,
-         REQUEST_DOMAIN,
-         REQUEST_DNS,
-         REQUEST_DOMAIN_SEARCH,
-         REQUEST_HOSTNAME,
-         REQUEST_NETBIOS_NS,
-         REQUEST_NETBIOS_SCOPE,
-         REQUEST_MTU,
-         REQUEST_ROUTE_STATIC,
-         REQUEST_NTP);
-
-my %option_types = (
-    OPTION_BOOT_FILE()		=> [TYPE_STRING, "boot_file"],
-    OPTION_BOOT_SERVER()	=> [TYPE_STRING, "boot_server"],
-    OPTION_BROADCAST()		=> [TYPE_IP, "braodcast"],
-    OPTION_DNS()		=> [TYPE_IPS, "dns", "DNS"],
-    OPTION_DOMAIN()		=> [TYPE_STRING, "domain"],
-    OPTION_FORWARDING()		=> [TYPE_FLAG, "forwarding"],
-    OPTION_GRUB()		=> [TYPE_STRING, "grub"],
-    OPTION_HOSTNAME()		=> [TYPE_STRING, "hostname"],
-    OPTION_LEASE_TIME()		=> [TYPE_UINT, "lease_time"],
-    OPTION_MASK()		=> [TYPE_IP, "mask"],
-    OPTION_MESSAGE()		=> [TYPE_STRING, "message"],
-    OPTION_NNTP()		=> [TYPE_IPS, "nntp", "NNTP"],
-    OPTION_NTP()		=> [TYPE_IPS, "ntp", "NTP"],
-    OPTION_OVERLOAD()		=> [TYPE_UINT8, "overload"],
-    OPTION_PROXY()		=> [TYPE_IP_PORT_PORT, "proxy"],
-    OPTION_REBIND_TIME()	=> [TYPE_UINT, "renewal_time"],
-    OPTION_RENEWAL_TIME()	=> [TYPE_UINT, "renewal_time"],
-    OPTION_REQUEST_IP()		=> [TYPE_IP, "client_address"],
-    OPTION_REQUEST_LIST()	=> [TYPE_UINT8S, "request_list"],
-    OPTION_ROUTER()		=> [TYPE_IP, "router"],
-    OPTION_SERVER()		=> [TYPE_ADDR, "server", ""],
-    OPTION_SMTP()		=> [TYPE_IPS, "smtp", "SMTP"],
-    OPTION_TIME_OFFSET()	=> [TYPE_INT, "time_offset"],
-    OPTION_TIME_SERVER()	=> [TYPE_IPS, "time_server"],
-    OPTION_TTL()		=> [TYPE_UINT8, "ttl", "TTL"],
-    OPTION_TYPE()		=> [TYPE_UINT8, "reply_type", ""],
-    OPTION_WWW()		=> [TYPE_IPS, "www", "WWW"],
-);
-
 my $PROTO_UDP = getprotobyname("udp") // 17;
 my $bootps = getservbyname("bootps", "udp") // 67;
 my $bootpc = getservbyname("bootpc", "udp") // 68;
-
-sub packet_build {
-    my ($type, $client_address, $server_address) = @_;
-    my @options = (
-        OPTION_TYPE, pack("W", $type),
-        OPTION_HOSTNAME, $hostname,
-        OPTION_SIZE_MAX, pack("n", 4096),
-        # OPTION_SIZE_MAX, pack("n", 676),
-        # OPTION_REQUEST_LIST, $request_list,
-    );
-    push @options, OPTION_REQUEST_IP, $client_address if $client_address;
-    push @options, OPTION_SERVER,     $server_address if $server_address;
-    my $n = @options / 2;
-    my $buffer = pack("W4Nnnx4x4x4a4a16x192N(WW/a*)${n}W",
-		      1,		# Boot request
-		      HW_ETHERNET,	# Hardware type
-		      6,		# Hardware addr length (6 bytes) <= 16
-		      0,		# Max Hops
-		      $xid,
-		      0,	# secs
-                      FLAG_BROADCAST, # flags
-                      $gateway_ip ? inet_aton($gateway_ip) : INADDR_ANY,
-                      $mac,
-                      COOKIE,
-                      @options,
-                      OPTION_END
-                  );
-    return $buffer;
-    #my $pad = PACKET_SIZE - length $buffer;
-    #die "Packet too long" if $pad < 0;
-    #return $buffer . "\x0" x $pad;
-}
-
-sub parse_options {
-    my ($options, $string) = @_;
-
-    my %accu;
-    while ($string ne "") {
-        my $type = ord substr($string, 0, 1, "");
-        next if $type == 0;
-        last if $type == OPTION_END;
-        my ($value, $pos) = unpack("W/a*.", $string);
-        $accu{$type} = exists $accu{$type} ? $accu{$type} . $value : $value;
-        substr($string, 0, $pos, "");
-    }
-    while (my ($type, $value) = each %accu) {
-        if (my $option_type = $option_types{$type}) {
-            my ($otype, $name, $disply_name) = @$option_type;
-            if (!defined $disply_name) {
-                $disply_name = ucfirst($name);
-                $disply_name =~ s/_(.)/ \u$1/g;
-            }
-            if ($otype == TYPE_IP) {
-                length $value == 4 || die "Unexpected $name length";
-                $options->{$name} = inet_ntoa($value);
-            } elsif ($otype == TYPE_IP_PORT_PORT) {
-                length $value == 8 || die "Unexpected $name length";
-                my ($addr, $p1, $p2) = unpack("a4nn", $value);
-                $options->{$name} = [inet_ntoa($addr), $p1, $p2];
-            } elsif ($otype == TYPE_IPS) {
-                length($value) % 4 == 0 || die "Unexpected $name length";
-                $options->{$name} = [map inet_ntoa($_), unpack("(a4)*", $value)];
-            } elsif ($otype == TYPE_ADDR) {
-                length $value == 4 || die "Unexpected $name length";
-                $options->{$name} = $value;
-            } elsif ($otype == TYPE_STRING) {
-                $options->{$name} = $value;
-            } elsif ($otype == TYPE_UINT) {
-                length $value == 4 || die "Unexpected $name length";
-                $options->{$name} = unpack("N", $value);
-            } elsif ($otype == TYPE_UINT8) {
-                length $value == 1 || die "Unexpected $name length";
-                $options->{$name} = unpack("W", $value);
-            } elsif ($otype == TYPE_FLAG) {
-                length $value == 1 || die "Unexpected $name length";
-                $options->{$name} =
-                    $value eq "\x0" ? 0 :
-                    $value eq "\x1" ? 1 :
-                    die "Invalid $name flag value";
-            } else {
-                die "Assertion: Unimplemented option type $option_type->[0]";
-            }
-            if ($verbose && $disply_name ne "") {
-                if (ref $options->{$name} eq "ARRAY") {
-                    print "$disply_name: @{$options->{$name}}\n";
-                } else {
-                    print "$disply_name: $options->{$name}\n";
-                }
-            }
-        } else {
-            $value = unpack("H*", $value);
-            print "Option $type: $value\n" if $verbose;
-        }
-    }
-}
-
-sub packet_receive {
-    my ($socket) = @_;
-
-    while (1) {
-        my $server = recv($socket, my $buffer, int(2**16), 0) //
-            die "Could not sysread: $^E";
-        my ($server_port, $server_addr) = unpack_sockaddr_in($server) or
-            die "Could not decode UDP sender address";
-
-        my ($op, $hw_type, $hw_len, $hops,
-            $reply_xid, $secs, $flags,
-            $client_addr, $your_addr, $boot_addr, $gateway_addr,
-            $hw_addr,
-            $server_name, $boot_file,
-            $cookie, $options)
-            = unpack("W4Nnna4a4a4a4a16a64a128Na*", $buffer);
-        $op == 2 || die "Unexpected boot reply type $op";
-        $hw_addr = substr($hw_addr, 0, $hw_len);
-        printf "%s\nReply (length %d) from %s:%d for %s\n",
-            $separator, length $buffer, inet_ntoa($server_addr), $server_port, unpack("H*", $hw_addr) if $verbose;
-        $hw_type == HW_ETHERNET || next;
-        $hw_addr eq $mac || next;
-        $cookie == COOKIE || next;
-        $reply_xid == $xid || next;
-        !$expect_addr || $server_addr eq $expect_addr || next;
-        my %option = (
-            server_addr	=> $server_addr,
-            server_ip	=> inet_ntoa($server_addr),
-            server_port	=> $server_port,
-            xid		=> $reply_xid,
-            xid_ip	=> inet_ntoa(pack("N", $reply_xid)),
-            client_addr	=> $client_addr,
-            client_ip	=> inet_ntoa($client_addr),
-            your_addr	=> $your_addr,
-            your_ip	=> inet_ntoa($your_addr),
-            boot_addr	=> $boot_addr,
-            boot_ip	=> inet_ntoa($boot_addr),
-            gateway_addr=> $gateway_addr,
-            gateway_ip	=> inet_ntoa($gateway_addr),
-            hw_addr	=> $hw_addr,
-        );
-        defined $options || die "Truncated DHCP reply";
-        my $hw = unpack("H*", $option{hw_addr});
-        $hw =~ s/(..)\B/$1:/g;
-        print <<"EOF" if $verbose
-op=$op, hw_type=$hw_type, hw_len=$hw_len, hops=$hops
-xid=$option{xid_ip} secs=$secs, flags=$flags
-client IP $option{client_ip}
-Your   IP $option{your_ip}
-Server IP $option{server_ip}
-Gate   IP $option{gateway_ip}
-MAC $hw
-EOF
-            ;
-        parse_options(\%option, $options);
-        if ($option{overload}) {
-            $option{overload} <= 3 ||
-                die "Invalid overload value '$option{overload}'";
-            if ($option{overload} & 1) {
-                # Untested since none of my DHCP servers do this
-                # First 'file'
-                parse_options(\%option, $boot_file);
-                $boot_file = undef;
-            }
-            if ($option{overload} & 2) {
-                # Untested since none of my DHCP servers do this
-                # Second 'sname'
-                parse_options(\%option, $server_name);
-                $server_name = undef;
-            }
-        }
-        if ($server_name) {
-            $option{server_name} = unpack("Z*", $server_name);
-            print "Server Name: $option{server_name}\n" if $verbose;
-        }
-        if ($boot_file) {
-            $option{boot_file} = unpack("Z*", $boot_file);
-            print "Boot File: $option{boot_file}\n" if $verbose;
-        }
-        exists $option{server} || die "Missing server identifier in DHCP reply";
-        $option{server} eq $server_addr || die "Inconsistent server";
-
-        # On my net the router can send a NAK even though the router does
-        # not mot match the server identifier. So we should do a perl "next" if
-        # server identifier does not match request
-
-        exists $option{reply_type} || die "No reply type";
-        return \%option;
-    }
-}
 
 socket(my $sender, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
     die "Could not create socket: $^E";
@@ -376,7 +93,8 @@ my $to   = pack_sockaddr_in($bootps, $server_addr);
 # bind($sender, $from) or die "Could not bind: $^E";
 connect($sender, $to) or die "Could not connect: $^E";
 # DISCOVER
-print $sender packet_build(DISCOVER);
+print $sender packet_build(DISCOVER, $xid, $gateway_ip, $mac,
+                           OPTION_HOSTNAME() => $hostname);
 
 socket(my $recv, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
     die "Could not create socket: $^E";
@@ -385,18 +103,19 @@ setsockopt($recv, SOL_SOCKET, SO_BROADCAST, 1) ||
 bind($recv, $from) or die "Could not bind: $^E";
 
 # OFFER
-my $options = packet_receive($recv);
+my $options = packet_receive($recv, $xid, undef, $mac);
 $options->{reply_type} == OFFER ||
     die "Unexpected reply type $options->{reply_type} (expected OFFER)";
 
 $xid = int(($xid+1) % 2**32);
 # REQUEST
-print $sender packet_build(REPLY,
-                           $options->{your_addr},
-                           $options->{server_addr});
+print $sender packet_build(REPLY, $xid, $gateway_ip, $mac,
+                           OPTION_HOSTNAME() => $hostname,
+                           OPTION_REQUEST_IP() => $options->{your_addr},
+                           OPTION_SERVER() => $options->{server_addr});
 
 # ACK
-$options = packet_receive($recv);
+$options = packet_receive($recv, $xid, $options->{server}, $mac);
 $options->{reply_type} == ACK ||
     die "Unexpected reply type $options->{reply_type} (expected ACK)";
 print "$separator\n" if $verbose;

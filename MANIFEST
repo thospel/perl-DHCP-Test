@@ -3,7 +3,8 @@ MANIFEST
 Makefile.PL
 README
 bin/dhcp_test
+lib/DHCP/Test.pm
 lib/DHCP/Test/Package.pm
-t/00_syntax.t
 md5-versions
+t/00_syntax.t
 version_check
