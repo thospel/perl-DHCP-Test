@@ -27,7 +27,7 @@ BEGIN {
 
 use Getopt::Long 2.24 qw(:config bundling require_order);
 use Socket
-    qw(pack_sockaddr_in unpack_sockaddr_in inet_aton inet_ntoa
+    qw(pack_sockaddr_in inet_aton
        PF_INET SOCK_DGRAM SOL_SOCKET SO_REUSEADDR INADDR_ANY INADDR_BROADCAST
        SO_BROADCAST);
 use Sys::Hostname qw(hostname);
@@ -94,7 +94,7 @@ my $to   = pack_sockaddr_in($bootps, $server_addr);
 connect($sender, $to) or die "Could not connect: $^E";
 # DISCOVER
 print $sender packet_build(DISCOVER, $xid, $gateway_ip, $mac,
-                           OPTION_HOSTNAME() => $hostname);
+                           hostname => $hostname);
 
 socket(my $recv, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
     die "Could not create socket: $^E";
@@ -104,19 +104,19 @@ bind($recv, $from) or die "Could not bind: $^E";
 
 # OFFER
 my $options = packet_receive($recv, $xid, undef, $mac);
-$options->{reply_type} == OFFER ||
-    die "Unexpected reply type $options->{reply_type} (expected OFFER)";
+$options->{message_type} == OFFER ||
+    die "Unexpected reply type $options->{message_type} (expected OFFER)";
 
 $xid = int(($xid+1) % 2**32);
 # REQUEST
 print $sender packet_build(REPLY, $xid, $gateway_ip, $mac,
-                           OPTION_HOSTNAME() => $hostname,
-                           OPTION_REQUEST_IP() => $options->{your_addr},
-                           OPTION_SERVER() => $options->{server_addr});
+                           hostname	=> $hostname,
+                           request_ip	=> $options->{your_ip},
+                           server	=> $options->{server_addr});
 
 # ACK
 $options = packet_receive($recv, $xid, $options->{server}, $mac);
-$options->{reply_type} == ACK ||
-    die "Unexpected reply type $options->{reply_type} (expected ACK)";
+$options->{message_type} == ACK ||
+    die "Unexpected reply type $options->{message_type} (expected ACK)";
 print "$separator\n" if $verbose;
 print "DHCP Server $options->{server_ip} gave out $options->{your_ip}\n";
