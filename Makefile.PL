@@ -61,6 +61,9 @@ WriteMakefile
          "Test::More"	=> "0.01",
      }) : (),
      PREREQ_PM		=> {
+         "Exporter::Tidy"		=> "0.06",
+         # After OpenBSD segfault patches (2014 should be old enough)
+         "IO::Interface::Simple"	=> "1.08",
      },
      ABSTRACT		=> 'Ton Hospel <DHCP-Test@ton.iguana.be>',
      AUTHOR		=> 'Ton Hospel <ton@>',

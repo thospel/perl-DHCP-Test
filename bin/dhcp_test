@@ -27,20 +27,19 @@ BEGIN {
 
 use Getopt::Long 2.24 qw(:config bundling require_order);
 use Socket
-    qw(pack_sockaddr_in inet_aton
-       PF_INET SOCK_DGRAM SOL_SOCKET SO_REUSEADDR INADDR_ANY INADDR_BROADCAST
-       SO_BROADCAST);
+    qw(pack_sockaddr_in unpack_sockaddr_in inet_aton inet_ntoa
+       PF_INET SOCK_DGRAM SO_REUSEADDR INADDR_ANY INADDR_BROADCAST);
 use Sys::Hostname qw(hostname);
 
 use DHCP::Test qw($verbose $separator
-                  SO_BINDTODEVICE DISCOVER OFFER REPLY ACK
+                  SO_BINDTODEVICE PROTO_UDP BOOTPC BOOTPS
+                  DISCOVER OFFER REQUEST ACK RELEASE
                   OPTION_HOSTNAME OPTION_REQUEST_IP OPTION_SERVER
-                  packet_build packet_receive);
+                  packet_send packet_receive);
 
 # Client chosen ID to match answers
 # my $xid = "41.42.43.44";
 my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
-my $mac = "00:25:90:a2:cf:e4";
 my $hostname = hostname();
 my $client_ip = "10.253.0.8";
 
@@ -48,14 +47,15 @@ die "Could not parse your command line. Try $0 -h\n" unless
     GetOptions("v|verbose!"	=> \$verbose,
                "xid=s"		=> \$xid,
                "i|interface=s"	=> \my $interface,
-               "m|mac=s"	=> \$mac,
+               "m|mac=s"	=> \my $mac,
                "H|hostname=s"	=> \$hostname,
                # do DHCP relay request. Answer is on port 67. Not supported yet
-               "g|gateway=s"	=> \my $gateway_ip,
+               "g|gateway:s"	=> \my $gateway_ip,
                # Do not broadcast but send to specific DHCP server
                "s|server=s"	=> \my $server_ip,
                # Only accept answer from specific DHCP server
                "e|expect=s"	=> \my $expect_ip,
+               "k|keep!"	=> \my $keep,
                "version!"	=> \my $version,
                "U|unsafe!"	=> \my $unsafe,
                "h|help!"	=> \my $help);
@@ -63,56 +63,45 @@ my $expect_addr = defined $expect_ip ?
     inet_aton($expect_ip) || die("Cannot parse $expect_ip") :
     undef;
 $xid = unpack("N", inet_aton($xid));
-my @mac = map hex, split /:/, $mac;
-@mac == 6 || die "Invalid MAC length";
-$_ <= 0xff || die "Invalid value in MAC" for @mac;
-$mac = pack("W*", @mac);
+if (defined $mac) {
+    my @mac = map hex, split /:/, $mac;
+    @mac == 6 || die "Invalid MAC length";
+    $_ <= 0xff || die "Invalid value in MAC" for @mac;
+    $mac = pack("W*", @mac);
+}
 my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
     die "Could not resolve $server_ip";
 
-my $PROTO_UDP = getprotobyname("udp") // 17;
-my $bootps = getservbyname("bootps", "udp") // 67;
-my $bootpc = getservbyname("bootpc", "udp") // 68;
-
-socket(my $sender, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
-    die "Could not create socket: $^E";
-
-# Autoflush $sender
-my $fh = select($sender);
-$|=1;
-select($fh);
-
-setsockopt($sender, SOL_SOCKET, SO_REUSEADDR, 1) ||
-    die "Could not setsockopt SO_REUSEADDR: $^E";
-setsockopt($sender, SOL_SOCKET, SO_BROADCAST, 1) ||
-    die "Could not setsockopt SO_BROADCAST: $^E";
-setsockopt($sender, SOL_SOCKET, SO_BINDTODEVICE, pack("Z*", $interface)) ||
-    die "Could not setsockopt SO_BINDTODEVICE: $^E" if $interface;
-my $from = pack_sockaddr_in($bootpc, INADDR_ANY);
-my $to   = pack_sockaddr_in($bootps, $server_addr);
-# bind($sender, $from) or die "Could not bind: $^E";
-connect($sender, $to) or die "Could not connect: $^E";
 # DISCOVER
-print $sender packet_build(DISCOVER, $xid, $gateway_ip, $mac,
-                           hostname => $hostname);
+$mac = packet_send(DISCOVER,
+                   $interface, $server_addr, $xid, $gateway_ip, $mac,
+                   hostname => $hostname);
 
-socket(my $recv, PF_INET, SOCK_DGRAM, $PROTO_UDP) ||
+socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
     die "Could not create socket: $^E";
-setsockopt($recv, SOL_SOCKET, SO_BROADCAST, 1) ||
-    die "Could not setsockopt SO_BROADCAST: $^E";
-bind($recv, $from) or die "Could not bind: $^E";
+#setsockopt($recv, SOL_SOCKET, SO_BROADCAST, 1) ||
+#    die "Could not setsockopt SO_BROADCAST: $^E";
+# setsockopt($recv, SOL_SOCKET, SO_REUSEADDR, 1) ||
+#    die "Could not setsockopt SO_REUSEADDR: $^E";
+my $from = pack_sockaddr_in(defined $gateway_ip ? BOOTPS : BOOTPC, INADDR_ANY);
+if (!bind($recv, $from)) {
+    my ($port, $addr) = unpack_sockaddr_in($from);
+    my $ip = inet_ntoa($addr);
+    die "Could not bind to $ip:$port: $^E";
+}
 
 # OFFER
-my $options = packet_receive($recv, $xid, undef, $mac);
+my $options = packet_receive($recv, $xid, $expect_addr, $mac);
 $options->{message_type} == OFFER ||
     die "Unexpected reply type $options->{message_type} (expected OFFER)";
 
 $xid = int(($xid+1) % 2**32);
 # REQUEST
-print $sender packet_build(REPLY, $xid, $gateway_ip, $mac,
-                           hostname	=> $hostname,
-                           request_ip	=> $options->{your_ip},
-                           server	=> $options->{server_addr});
+packet_send(REQUEST,
+            $interface, $server_addr, $xid, $gateway_ip, $mac,
+            hostname	=> $hostname,
+            request_ip	=> $options->{your_ip},
+            server	=> $options->{server_addr});
 
 # ACK
 $options = packet_receive($recv, $xid, $options->{server}, $mac);
@@ -120,3 +109,13 @@ $options->{message_type} == ACK ||
     die "Unexpected reply type $options->{message_type} (expected ACK)";
 print "$separator\n" if $verbose;
 print "DHCP Server $options->{server_ip} gave out $options->{your_ip}\n";
+
+if (!$keep) {
+    # RELEASE
+    packet_send(RELEASE,
+                $interface, $server_addr, $xid, $gateway_ip, $mac,
+                hostname	=> $hostname,
+                request_ip	=> $options->{your_ip},
+                server		=> $options->{server_addr});
+    print "And release...\n" if $verbose;
+}

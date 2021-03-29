@@ -5,22 +5,41 @@ use warnings;
 our $VERSION = "1.000";
 
 use Carp;
-use Socket qw(INADDR_ANY unpack_sockaddr_in inet_ntoa inet_aton);
+use Socket qw(INADDR_ANY PF_INET SOCK_DGRAM SOL_SOCKET SO_BROADCAST
+              pack_sockaddr_in unpack_sockaddr_in inet_ntoa inet_aton);
+use IO::Interface::Simple;
 use constant {
     # This is the linux value. Can/will be different on a different OS
     SO_BINDTODEVICE	=> 25,
+    BOOTPS		=> getservbyname("bootps", "udp") // 67,
+    BOOTPC		=> getservbyname("bootpc", "udp") // 68,
+    PROTO_UDP		=> getprotobyname("udp") // 17,
+
     BLOCK_SIZE		=> int(2**16),
 
     BOOTREQUEST		=> 1,
     BOOTREPLY		=> 2,
 
-    HW_ETHERNET		=> 1,
+    HW_ETHERNET		=>  1,
     COOKIE		=> 0x63825363,
-    DISCOVER		=> 1,
-    OFFER		=> 2,
-    REPLY		=> 3,
-    ACK			=> 5,
-    NAK			=> 6,
+    DISCOVER		=>  1,
+    OFFER		=>  2,
+    REQUEST		=>  3,
+    DECLINE		=>  4,
+    ACK			=>  5,
+    NAK			=>  6,
+    RELEASE		=>  7,
+    INFORM		=>  8,
+    FORCERENEW		=>  9,
+    LEASEQUERY		=> 10,
+    LEASEUNASSIGNED	=> 11,
+    LEASEUNKNOWN	=> 12,
+    LEASEACTIVE		=> 13,
+    BULKLEASEQUERY	=> 14,
+    LEASEQUERYDONE	=> 15,
+    ACTIVELEASEQUERY	=> 16,
+    LEASEQUERYSTATUS	=> 17,
+    TLS			=> 18,
     FLAG_BROADCAST	=> 0x8000,
 
     # DHCP Options
@@ -91,6 +110,7 @@ use constant {
 our $verbose;
 our $separator = "===============";
 use Exporter::Tidy
+    socket  => [qw(BOOTPS BOOTPC PROTO_UDP SO_BINDTODEVICE)],
     options => [qw(OPTION_MASK OPTION_TIME_OFFSET OPTION_ROUTER
                    OPTION_TIME_SERVER OPTION_DNS OPTION_HOSTNAME OPTION_DOMAIN
                    OPTION_FORWARDING OPTION_TTL OPTION_BROADCAST OPTION_NTP
@@ -100,9 +120,8 @@ use Exporter::Tidy
                    OPTION_BOOT_SERVER OPTION_BOOT_FILE OPTION_SMTP OPTION_NNTP
                    OPTION_WWW OPTION_GRUB OPTION_PROXY OPTION_SOCKS OPTION_END)],
     other => [qw($verbose $separator
-                 SO_BINDTODEVICE
-                 DISCOVER OFFER REPLY ACK NAK
-                 packet_build options_parse packet_receive)];
+                 DISCOVER OFFER REQUEST ACK NAK RELEASE
+                 packet_send options_parse packet_receive)];
 
 my $request_list =
     pack("W*",
@@ -144,6 +163,7 @@ my %option_types = (
     OPTION_SERVER()		=> [TYPE_ADDR, "server", ""],
     OPTION_SIZE_MAX()		=> [TYPE_UINT16, "size_max", "Max Packet Size"],
     OPTION_SMTP()		=> [TYPE_IPS, "smtp", "SMTP"],
+    OPTION_SOCKS()		=> [TYPE_IP, "socks"],
     OPTION_TIME_OFFSET()	=> [TYPE_INT, "time_offset"],
     OPTION_TIME_SERVER()	=> [TYPE_IPS, "time_server"],
     OPTION_TTL()		=> [TYPE_UINT8, "ttl", "TTL"],
@@ -197,27 +217,72 @@ sub options_build {
     return $str . pack("W", OPTION_END);
 }
 
-sub packet_build {
-    my ($type, $xid, $gateway_ip, $mac, %options) = @_;
-    my $buffer = pack("W4Nnnx4x4x4a4a16x192N",
-		      BOOTREQUEST,	# Message opcode
-		      HW_ETHERNET,	# Hardware type
-		      6,		# Hardware addr length (6 bytes) <= 16
-		      0,		# Max Hops
+sub packet_send {
+    my ($type, $interface, $target, $xid, $gateway_ip, $mac, %options) = @_;
+
+    my $ciaddr = INADDR_ANY;
+    if ($type == RELEASE) {
+        my $client_ip = delete $options{request_ip} //
+            croak "Missing mandatory option 'request_ip'";
+        $ciaddr = inet_aton($client_ip) // croak "Invalid 'request_ip' value";
+    }
+    socket(my $sender, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
+        die "Could not create socket: $^E";
+    setsockopt($sender, SOL_SOCKET, SO_BROADCAST, 1) ||
+        die "Could not setsockopt SO_BROADCAST: $^E";
+    my $if;
+    if ($interface) {
+        setsockopt($sender, SOL_SOCKET, SO_BINDTODEVICE,
+                   pack("Z*", $interface)) ||
+                       die "Could not setsockopt SO_BINDTODEVICE('$interface'): $^E";
+        $if = IO::Interface::Simple->new($interface) //
+            die "Could not get properties of interface '$interface'" if !$mac;
+    }
+    # setsockopt($sender, SOL_SOCKET, SO_REUSEADDR, 1) ||
+    #    die "Could not setsockopt SO_REUSEADDR: $^E";
+    # my $from = pack_sockaddr_in(BOOTPC, INADDR_ANY);
+    # bind($sender, $from) or die "Could not bind: $^E";
+    my $to   = pack_sockaddr_in(BOOTPS, $target);
+    connect($sender, $to) or die "Could not connect: $^E";
+    my $from = getsockname($sender) // die "Could not getsockname: $^E";
+        my ($port, $from_addr) = unpack_sockaddr_in($from);
+        my $from_ip = inet_ntoa($from_addr);
+    $gateway_ip = $from_ip if defined $gateway_ip && $gateway_ip eq "";
+    if (!$mac) {
+        $if //= IO::Interface::Simple->new_from_address($from_ip) //
+            die "Could not get local interface for IP $from_ip";
+        $mac = $if->hwaddr //
+            die "Could not get MAC address of interface $if";
+        my @mac = map hex, split /:/, $mac;
+        @mac == 6 || die "Invalid MAC length";
+        $_ <= 0xff || die "Invalid value in MAC" for @mac;
+        $mac = pack("W*", @mac);
+    }
+
+    my $buffer = pack("W4Nnna4x4x4a4a16x192N",
+		      BOOTREQUEST, # Message opcode
+		      HW_ETHERNET, # Hardware type
+		      6,           # Hardware addr length (6 bytes) <= 16
+		      0,           # Max Hops
 		      $xid,
-		      0,	# secs
+		      0,              # secs
                       FLAG_BROADCAST, # flags
+                      $ciaddr,
                       $gateway_ip ? inet_aton($gateway_ip) : INADDR_ANY,
                       $mac,
                       COOKIE,
                   );
     # Probably should add a check for overlong packets...
-    return $buffer . options_build(size_max => 406,
+    $buffer .= options_build(size_max => 406,
                                    %options,
                                    message_type => $type);
     #my $pad = PACKET_SIZE - length $buffer;
     #die "Packet too long" if $pad < 0;
-    #return $buffer . "\x0" x $pad;
+    my $rc = syswrite($sender, $buffer) //
+        die "Could not send message: $^E";
+    length $buffer == $rc ||
+        die "Sent truncated DHCP message\n";
+    return $mac;
 }
 
 sub options_parse {
@@ -299,17 +364,17 @@ sub packet_receive {
             $server_name, $boot_file,
             $cookie, $options)
             = unpack("W4Nnna4a4a4a4a16a64a128Na*", $buffer);
-        if ($op != BOOTREPLY) {
-            warn("Unexpected message op code $op\n");
-            next;
-        }
+
+        # This happens. We will at least see our own broadcast
+        $op == BOOTREPLY || next;
+
         $cookie && $cookie == COOKIE || next;
-        $hw_type == HW_ETHERNET || next;
-        $reply_xid == $xid || next;
         $hw_addr = substr($hw_addr, 0, $hw_len);
+        $hw_addr eq $mac || next;
         printf "%s\nReply (length %d) from %s:%d for %s\n",
             $separator, length $buffer, inet_ntoa($server_addr), $server_port, unpack("H*", $hw_addr) if $verbose;
-        $hw_addr eq $mac || next;
+        $hw_type == HW_ETHERNET || next;
+        $reply_xid == $xid || next;
         !$expect_addr || $server_addr eq $expect_addr || next;
         my %option = (
             server_addr	=> $server_addr,
