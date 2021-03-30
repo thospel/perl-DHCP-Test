@@ -36,13 +36,15 @@ use DHCP::Test qw($verbose $separator
                   DISCOVER OFFER REQUEST ACK RELEASE
                   OPTION_HOSTNAME OPTION_REQUEST_IP OPTION_SERVER
                   packet_send packet_receive);
+use DHCP::Test::Package;
 
 # Client chosen ID to match answers
 # my $xid = "41.42.43.44";
 my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
-my $hostname = hostname();
+my $hostname_local = hostname();
+$hostname_local =~ s/\..*//sg;
 my $timeout = 1;
-my $retries = 4;
+my $retries = 3;
 
 die "Could not parse your command line. Try $0 -h\n" unless
     GetOptions("v|verbose!"	=> \$verbose,
@@ -51,10 +53,13 @@ die "Could not parse your command line. Try $0 -h\n" unless
                "t|timeout=f"	=> \$timeout,
                "i|interface=s"	=> \my $interface,
                "m|mac=s"	=> \my $mac,
-               "H|hostname=s"	=> \$hostname,
+               "H|hostname:s"	=> \my $hostname,
+               "p|port=o"	=> \my $port,
                # do DHCP relay request. Answer is on port 67. Not supported yet
                "g|gateway:s"	=> \my $gateway_ip,
                "u|unicast!"	=> \my $unicast,
+               "b|broadcast!"	=> \my $broadcast,
+               "T|track!"	=> \my $track,
                # Do not broadcast but send to specific DHCP server
                "s|server=s"	=> \my $server_ip,
                # Only accept answer from specific DHCP server
@@ -63,18 +68,37 @@ die "Could not parse your command line. Try $0 -h\n" unless
                "version!"	=> \my $version,
                "U|unsafe!"	=> \my $unsafe,
                "h|help!"	=> \my $help);
+
+if ($version) {
+    ## no critic (UselessNoCritic RequireCheckedSyscalls)
+    print<<"EOF";
+dhcp_test $VERSION (DHCP::Test $DHCP::Test::Package::VERSION)
+EOF
+    exit 0;
+}
+if ($help) {
+    require Config;
+    $ENV{PATH} .= ":" unless $ENV{PATH} eq "";
+    $ENV{PATH} = "$ENV{PATH}$Config::Config{'installscript'}";
+    exit system("perldoc", "-F", $unsafe ? "-U" : (), "$Bin/$Script") ? 1 : 0;
+    # make parser happy
+    %Config::Config = ();
+}
+
+$hostname = $hostname_local if defined $hostname && $hostname eq "";
 my $expect_addr = defined $expect_ip ?
-    inet_aton($expect_ip) || die("Cannot parse $expect_ip") :
+    inet_aton($expect_ip) || die("Could not resolve expect IP '$expect_ip'") :
     undef;
-$xid = unpack("N", inet_aton($xid));
+$xid = unpack("N", inet_aton($xid) // die "Could not resolve xid '$xid'");
 if (defined $mac) {
     my @mac = map hex, split /:/, $mac;
     @mac == 6 || die "Invalid MAC length";
     $_ <= 0xff || die "Invalid value in MAC" for @mac;
     $mac = pack("W*", @mac);
 }
+$broadcast = 1 if !defined $broadcast && !$server_ip;
 my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
-    die "Could not resolve $server_ip";
+    die "Could not resolve server IP '$server_ip'";
 
 socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
     die "Could not create socket: $^E";
@@ -82,7 +106,7 @@ socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
 #    die "Could not setsockopt SO_BROADCAST: $^E";
 # setsockopt($recv, SOL_SOCKET, SO_REUSEADDR, 1) ||
 #    die "Could not setsockopt SO_REUSEADDR: $^E";
-my $from = pack_sockaddr_in(defined $gateway_ip ? BOOTPS : BOOTPC, INADDR_ANY);
+my $from = pack_sockaddr_in($port || (defined $gateway_ip ? BOOTPS : BOOTPC), INADDR_ANY);
 if (!bind($recv, $from)) {
     my ($port, $addr) = unpack_sockaddr_in($from);
     my $ip = inet_ntoa($addr);
@@ -91,13 +115,12 @@ if (!bind($recv, $from)) {
 $recv->blocking(0);
 
 my $options1;
-for my $try (1..$retries) {
+for my $try (0..$retries) {
     # DISCOVER
     $mac = packet_send(DISCOVER,
                        $interface, $server_addr, $xid, $gateway_ip, $mac,
-                       $unicast,
-                       hostname => $hostname);
-    print "$separator\nDISCOVER sent\n" if $verbose;
+                       $broadcast, $unicast,
+                       defined $hostname ? (hostname => $hostname) : ());
 
     # OFFER
     last if
@@ -114,15 +137,14 @@ $options1->{message_type} == OFFER ||
 $xid = int(($xid+1) % 2**32);
 
 my $options2;
-for my $try (1..$retries) {
+for my $try (0..$retries) {
     # REQUEST
     packet_send(REQUEST,
-                $interface, $server_addr, $xid, $gateway_ip, $mac,
-                $unicast,
-                hostname	=> $hostname,
+                $interface, $track ? $options1->{server_addr} : $server_addr, $xid, $gateway_ip, $mac,
+                $track ? 0 : $broadcast, $unicast,
+                defined $hostname ? (hostname	=> $hostname) : (),
                 request_ip	=> $options1->{your_ip},
-                server	=> $options1->{server_addr});
-    print "$separator\nREQUEST sent\n" if $verbose;
+                server		=> $options1->{server_addr});
 
     # ACK
     last if
@@ -141,10 +163,243 @@ print "DHCP Server $options2->{server_ip} gave out $options2->{your_ip}\n";
 if (!$keep) {
     # RELEASE
     packet_send(RELEASE,
-                $interface, $server_addr, $xid, $gateway_ip, $mac,
-                $unicast,
-                hostname	=> $hostname,
+                $interface, $track ? $options2->{server_addr} : $server_addr,
+                $xid, $gateway_ip, $mac,
+                $track ? 0 : $broadcast, $unicast,
+                defined $hostname ? (hostname	=> $hostname) : (),
                 request_ip	=> $options2->{your_ip},
                 server		=> $options2->{server_addr});
-    print "$separator\nRELEASE sent\n" if $verbose;
 }
+__END__
+
+=head1 NAME
+
+dhcp_test - Do a test DHCP exchange
+
+=head1 SYNOPSIS
+
+ dcp_test [-v|--verbose] [-k|--keep] [-m|-mac <string>] [--xid <INT>]
+          [-H|--hostname [<string>]] [-e|--expect <IP>]
+          [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
+          [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
+          [-p|--port <INT>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
+ dhcp_test [--version] [-U | --unsafe] [-h | --help]
+
+=head1 DESCRIPTION
+
+B<dhcp_test> does a complete exchange with a DHCP server.
+Send DHCPDISCOVER, receive DHCPOFFER, send DHCPREQUEST, receive DHCPACK and
+send DHCPRELEASE.
+
+=head1 OPTIONS
+
+Valid options are:
+
+=over 4
+
+=item X<verbose>-v, --verbose
+
+Print details about the DHCP exchange
+
+=item X<keep>-k, --keep
+
+Do not release the IP address at the end of the exchange
+(don't send the DHCPRELEASE).
+
+=item X<hostname>-H, --hostname I<STRING>
+
+Propose this hostname to the DHCP server. If this option is given but the I<STRING> value is absent or empty it will use the name of the host the program runs
+ on.
+
+=item X<mac>-m, --mac I<STRING>
+
+The MAC address what will be sent with the DHCPDISCOVER request. If this option
+is not given the MAC address of the sending interface will be used.
+
+The program currently only supports ethernet.
+
+=item X<xis>--xid I<INT>
+
+Use I<INT> as transaction identifier. Can also be given as an I<IP> which is
+then converted to number. If not given an appropiate value is generated
+internally.
+
+This value will be used for the DHCPDISCOVER request. After selecting a
+DHCPOFFER response the value is increased by I<1> (wrapped) and the result is
+used for DHCPREQUEST and DHCPRELEASE.
+
+=item X<expect>-e, --expect I<IP>
+
+When DHCPDISCOVER requests are broadcast multiple DHCP servers can answer.
+By default the first DHCPOFFER received will be selected to go ahead with.
+If this option is given only a reponse from the DHCP server with the given I<IP>
+will be selected.
+
+The sender of the selected DHCPOFFER (irrespective of the value of this option)
+will always be used for selection in the following steps.
+
+=item X<server>-s, --server I<IP>
+
+Send DHCP requests to the given I<IP>. If this option is not given it will
+use the broadcast address I<255.255.255.255>.
+
+=item X<interface>-i, --interface I<string>
+
+Bind the sending socket to the named interface (e.g. I<eth0>). This can be
+important if you need the packets to be sent over a specific interface.
+If this option is not given the operating system will typically send requests
+over the interface that the routing table will select for the
+L<server|/server> value.
+
+=item X<track>-T, --track
+
+This options modifies the meaning L<--server|/server> value.
+
+The DHCPDISCOVER will still be send to the given L<--server|/server> address,
+but all subsequent requests will be directly sent to the DHCP server that sent
+the selected DHCPOFFER response.
+
+=item X<broadcast>-b, --broadcast
+
+This option defaults to true if no L<--server|/server> option is give. Otherwise
+it defaults to false.
+
+If this option is true the broadcast flag is applied to the socket sending the
+DHCPDISCOVER request. This is needed on most operating systems to be allowed
+to send a broadcast packet, but this will usually need special permissions
+(like being C<root> on unix).
+
+The flag is also used for subsequent requests except if the L<--track|/track>
+option is given. In that last case the packets are directly sent to the DHCP
+server whose DHCPOFFER was selected, so no broadcast flag is needed.
+
+This option controls request packets. So don't confuse this with the
+L<--unicast|/unicast> option which controls response packets.
+
+=item X<unicast>-u, --unicast
+
+By default a flag is set in each DHCP request which requests that the response
+gets sent as a broadcast.
+
+If this option is given that flag is not set and as a result the response will
+be sent directly to the IP address that gets assigned by the DHCP server. Unless
+this is an IP address of the host on which this program is running the program
+will not see the response and the DHCP exchange will fail. So only use this
+option if you have some cunning plan.
+
+The option will be ignored if the program acts as a DHCP relay (using the
+L<--gateway|/gateway> option)
+
+This option (indirectly) controls response packets. So don't confuse this with
+the L<--broadcast|/broadcast> option which controls request packets.
+
+=item X<gateway>-g, --gateway I<IP>
+
+The program will behave like a DHCP relay. All requests will use the given I<IP>
+as the gateway address. The I<IP> argument is optional. If this option is given
+without argument or with an empty argument it will use a local IP address instead (the IP address that
+would be used as source for packets to L<sender|/sender>).
+
+If this option is used the DHCP server will send its responses back to I<IP>.
+So if this is not a local IP the program will normally not see the DHCP response
+so only do that if you have a cunning plan.
+
+Notice that this option is the way you tell a DHCP server to select an address
+from a different subnet than the one with the DGCP server address.
+
+=item X<port>-p, --port I<INT>
+
+Listen for responses on port I<INT>.
+
+If this option is not given, the program listens on port I<68> unless the
+L<gateway|/gateway> option is given in which case it will listen on port I<67>.
+On most operating systems these low port numbers will usually need special
+permissions (like being C<root> on unix).
+
+Since you have no control over to which port the DHCP server will send its
+responses using this option will normally mean the program won't see the
+response so only use this option if you have a cunning plan.
+
+=item X<timeout>-r, --timeout I<FLOAT>
+
+After sending a DHCP request the program will wait for I<FLOAT> seconds for
+a resonse. Defaults to I<1>.
+
+=item X<retries>-r, --retries I<INT>
+
+If the DHCP response times out the program will retry I<INT> more times.
+Defaults to I<3>.
+
+=item X<help>-h, --help
+
+Show this help.
+
+=item X<unsafe>-U, --unsafe
+
+Allow even root to run the perldoc.
+Remember, the reason this is off by default is because it B<IS> unsafe.
+
+=item X<version>--version
+
+Print version info.
+
+=back
+
+All I<IP> values can also be given as names that will then be resolved.
+
+=head1 EXAMPLE
+
+Simplest use: Do a broadcast, get an IP address assigned and release it
+
+   dhcp_test
+
+The same but with more details about the steps:
+
+   dhcp_test -v
+
+Do the same thing but don't release the assigned IP address at the end:
+
+   dhcp_test -k
+
+The same but function as a DHCP relay:
+
+   dhcp_test -g
+
+Do the DHCP exchange only with a specific DHCP server without broadcast:
+
+   dhcp_test -s IP
+
+Do normal DHCP broadcasts, but only accept offers from a specific DHCP server:
+
+   dhcp_test -e IP
+
+A more complex example:
+
+Send a request on interface C<eth0> (-i) to C<10.253.0.8> (-s) for a host with
+MAC address C<01:02:03:04:05:06> (-m) and proposed hostname C<pluto> as a DHCP
+relay (-g). Once a DHCPOFFER is received send all followup requests to the DHCP
+server that answered (-T):
+
+   dhcp_test -s 10.253.0.8 -m 01:02:03:04:05:06 -H pluto -k -g -T -i eth0
+
+=head1 BUGS
+
+None known
+
+=head1 SEE ALSO
+
+L<dhcpd(8)>,
+
+=head1 AUTHOR
+
+Ton Hospel, E<lt>DHCP-Test@ton.iguana.beE<gt>
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2021 by Ton Hospel
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself, either Perl version 5.8.1 or,
+at your option, any later version of Perl 5 you may have available.
+
+=cut

@@ -122,9 +122,13 @@ use Exporter::Tidy
                    OPTION_SIZE_MAX OPTION_RENEWAL_TIME OPTION_REBIND_TIME
                    OPTION_BOOT_SERVER OPTION_BOOT_FILE OPTION_SMTP OPTION_NNTP
                    OPTION_WWW OPTION_GRUB OPTION_PROXY OPTION_SOCKS OPTION_END)],
+    message_types => [
+        qw(DISCOVER OFFER REQUEST DECLINE ACK NAK RELEASE INFORM
+           FORCERENEW LEASEQUERY LEASEUNASSIGNED LEASEUNKNOWN LEASEACTIVE
+           BULKLEASEQUERY LEASEQUERYDONE ACTIVELEASEQUERY LEASEQUERYSTATUS TLS)],
     other => [qw($verbose $separator
-                 DISCOVER OFFER REQUEST ACK NAK RELEASE
-                 packet_send options_parse packet_receive)];
+                 packet_send options_parse packet_receive
+                 message_type)];
 
 my $request_list =
     pack("W*",
@@ -181,6 +185,33 @@ while (my ($tag, $option_type) = each %option_types) {
     $option_names{$option_type->[1]} = $option_type;
 }
 
+my %message_type = (
+    DISCOVER()		=> "DISCOVER",
+    OFFER()		=> "OFFER",
+    REQUEST()		=> "REQUEST",
+    DECLINE()		=> "DECLINE",
+    ACK()		=> "ACK",
+    NAK()		=> "NAK",
+    RELEASE()		=> "RELEASE",
+    INFORM()		=> "INFORM",
+    FORCERENEW()	=> "FORCERENEW",
+    LEASEQUERY()	=> "LEASEQUERY",
+    LEASEUNASSIGNED()	=> "LEASEUNASSIGNED",
+    LEASEUNKNOWN()	=> "LEASEUNKNOWN",
+    LEASEACTIVE()	=> "LEASEACTIVE",
+    BULKLEASEQUERY()	=> "BULKLEASEQUERY",
+    LEASEQUERYDONE()	=> "LEASEQUERYDONE",
+    ACTIVELEASEQUERY()	=> "ACTIVELEASEQUERY",
+    LEASEQUERYSTATUS()	=> "LEASEQUERYSTATUS",
+    TLS()		=> "TLS",
+);
+
+sub message_type {
+    my ($type) = @_;
+
+    return $message_type{$type} || "MESSAGE(uknown type $type)";
+}
+
 sub options_build {
     my (%options) = @_;
 
@@ -221,7 +252,8 @@ sub options_build {
 }
 
 sub packet_send {
-    my ($type, $interface, $target, $xid, $gateway_ip, $mac, $unicast, %options) = @_;
+    my ($type, $interface, $target, $xid, $gateway_ip, $mac,
+        $broadcast, $unicast, %options) = @_;
 
     my $ciaddr = INADDR_ANY;
     if ($type == RELEASE) {
@@ -231,7 +263,7 @@ sub packet_send {
     }
     socket(my $sender, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
         die "Could not create socket: $^E";
-    setsockopt($sender, SOL_SOCKET, SO_BROADCAST, 1) ||
+    !$broadcast || setsockopt($sender, SOL_SOCKET, SO_BROADCAST, 1) ||
         die "Could not setsockopt SO_BROADCAST: $^E";
     my $if;
     if ($interface) {
@@ -271,7 +303,7 @@ sub packet_send {
 		      0,           # secs
                       $unicast ? 0 : FLAG_BROADCAST,	# flags
                       $ciaddr,
-                      $gateway_ip ? inet_aton($gateway_ip) : INADDR_ANY,
+                      $gateway_ip ? inet_aton($gateway_ip) // die("Could nor resolve gatway IP '$gateway_ip'"): INADDR_ANY,
                       $mac,
                       COOKIE,
                   );
@@ -283,6 +315,8 @@ sub packet_send {
     #die "Packet too long" if $pad < 0;
     my $rc = syswrite($sender, $buffer) //
         die "Could not send message: $^E";
+    printf("%s\nDHCP%s sent to %s\n",
+           $separator, message_type($type), inet_ntoa($target)) if $verbose;
     length $buffer == $rc ||
         die "Sent truncated DHCP message\n";
     return $mac;
@@ -442,11 +476,13 @@ EOF
         }
         if ($server_name) {
             $option{server_name} = unpack("Z*", $server_name);
-            print "Server Name: $option{server_name}\n" if $verbose;
+            print "Server Name: $option{server_name}\n" if
+                $verbose && $option{server_name} ne "";
         }
         if ($boot_file) {
             $option{boot_file} = unpack("Z*", $boot_file);
-            print "Boot File: $option{boot_file}\n" if $verbose;
+            print "Boot File: $option{boot_file}\n" if
+                $verbose && $option{boot_file} ne "";
         }
         exists $option{server} || die "Missing server identifier in DHCP reply";
         $option{server} eq $server_addr || die "Inconsistent server";
