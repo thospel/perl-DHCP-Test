@@ -35,7 +35,7 @@ use DHCP::Test qw($verbose $separator
                   SO_BINDTODEVICE PROTO_UDP BOOTPC BOOTPS
                   DISCOVER OFFER REQUEST ACK RELEASE
                   OPTION_HOSTNAME OPTION_REQUEST_IP OPTION_SERVER
-                  packet_send packet_receive);
+                  parse_address packet_send packet_receive);
 use DHCP::Test::Package;
 
 # Client chosen ID to match answers
@@ -54,7 +54,7 @@ die "Could not parse your command line. Try $0 -h\n" unless
                "i|interface=s"	=> \my $interface,
                "m|mac=s"	=> \my $mac,
                "H|hostname:s"	=> \my $hostname,
-               "p|port=o"	=> \my $port,
+               "l|listen=s"	=> \my $listen,
                # do DHCP relay request. Answer is on port 67. Not supported yet
                "g|gateway:s"	=> \my $gateway_ip,
                "u|unicast!"	=> \my $unicast,
@@ -65,6 +65,7 @@ die "Could not parse your command line. Try $0 -h\n" unless
                # Only accept answer from specific DHCP server
                "e|expect=s"	=> \my $expect_ip,
                "k|keep!"	=> \my $keep,
+               "fou=s"		=> \my $fou,
                "version!"	=> \my $version,
                "U|unsafe!"	=> \my $unsafe,
                "h|help!"	=> \my $help);
@@ -99,6 +100,7 @@ if (defined $mac) {
 $broadcast = 1 if !defined $broadcast && !$server_ip;
 my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
     die "Could not resolve server IP '$server_ip'";
+$fou = parse_address($fou, "127.0.0.1", undef, "fou receiver") if defined $fou;
 
 socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
     die "Could not create socket: $^E";
@@ -106,7 +108,11 @@ socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
 #    die "Could not setsockopt SO_BROADCAST: $^E";
 # setsockopt($recv, SOL_SOCKET, SO_REUSEADDR, 1) ||
 #    die "Could not setsockopt SO_REUSEADDR: $^E";
-my $from = pack_sockaddr_in($port || (defined $gateway_ip ? BOOTPS : BOOTPC), INADDR_ANY);
+my $from = parse_address(
+    $listen // "",
+    "0.0.0.0",
+    defined $gateway_ip ? BOOTPS : BOOTPC,
+    "listen address");
 if (!bind($recv, $from)) {
     my ($port, $addr) = unpack_sockaddr_in($from);
     my $ip = inet_ntoa($addr);
@@ -118,7 +124,7 @@ my $options1;
 for my $try (0..$retries) {
     # DISCOVER
     $mac = packet_send(DISCOVER,
-                       $interface, $server_addr, $xid, $gateway_ip, $mac,
+                       $fou, $interface, $server_addr, $xid, $gateway_ip, $mac,
                        $broadcast, $unicast,
                        defined $hostname ? (hostname => $hostname) : ());
 
@@ -140,7 +146,9 @@ my $options2;
 for my $try (0..$retries) {
     # REQUEST
     packet_send(REQUEST,
-                $interface, $track ? $options1->{server_addr} : $server_addr, $xid, $gateway_ip, $mac,
+                $fou, $interface,
+                $track ? $options1->{server_addr} : $server_addr,
+                $xid, $gateway_ip, $mac,
                 $track ? 0 : $broadcast, $unicast,
                 defined $hostname ? (hostname	=> $hostname) : (),
                 request_ip	=> $options1->{your_ip},
@@ -163,7 +171,8 @@ print "DHCP Server $options2->{server_ip} gave out $options2->{your_ip}\n";
 if (!$keep) {
     # RELEASE
     packet_send(RELEASE,
-                $interface, $track ? $options2->{server_addr} : $server_addr,
+                $fou, $interface,
+                $track ? $options2->{server_addr} : $server_addr,
                 $xid, $gateway_ip, $mac,
                 $track ? 0 : $broadcast, $unicast,
                 defined $hostname ? (hostname	=> $hostname) : (),
@@ -179,10 +188,10 @@ dhcp_test - Do a test DHCP exchange
 =head1 SYNOPSIS
 
  dcp_test [-v|--verbose] [-k|--keep] [-m|-mac <string>] [--xid <INT>]
-          [-H|--hostname [<string>]] [-e|--expect <IP>]
+          [-H|--hostname [<string>]] [-e|--expect <IP>] [--fou <ADDRESS>]
           [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
           [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
-          [-p|--port <INT>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
+          [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
  dhcp_test [--version] [-U | --unsafe] [-h | --help]
 
 =head1 DESCRIPTION
@@ -224,6 +233,9 @@ Use I<INT> as transaction identifier. Can also be given as an I<IP> which is
 then converted to number. If not given an appropiate value is generated
 internally.
 
+Transaction IDss are used to match DHCP responses with DHCP requests
+(among other things. the program also checks for a MAC address match).
+
 This value will be used for the DHCPDISCOVER request. After selecting a
 DHCPOFFER response the value is increased by I<1> (wrapped) and the result is
 used for DHCPREQUEST and DHCPRELEASE.
@@ -232,8 +244,8 @@ used for DHCPREQUEST and DHCPRELEASE.
 
 When DHCPDISCOVER requests are broadcast multiple DHCP servers can answer.
 By default the first DHCPOFFER received will be selected to go ahead with.
-If this option is given only a reponse from the DHCP server with the given I<IP>
-will be selected.
+If this option is given only a DHCPOFFER from the DHCP server with the given
+I<IP> will be selected.
 
 The sender of the selected DHCPOFFER (irrespective of the value of this option)
 will always be used for selection in the following steps.
@@ -242,6 +254,15 @@ will always be used for selection in the following steps.
 
 Send DHCP requests to the given I<IP>. If this option is not given it will
 use the broadcast address I<255.255.255.255>.
+
+Notice that L<--expect|/expect> option may still be needed since since the
+answers don't always come from from server I<ip>, e.g, with a multihomed DHCP
+server.
+And there is always a chance that some other DHCP server sends a response which
+just happens to match all relevant properties (mostly MAC address and
+transaction ID). This is less theoretical than it may seem because some DHCP
+servers snoop network traffic and respond to requests even if the request is
+specifically not addressed to them.
 
 =item X<interface>-i, --interface I<string>
 
@@ -307,18 +328,39 @@ so only do that if you have a cunning plan.
 Notice that this option is the way you tell a DHCP server to select an address
 from a different subnet than the one with the DGCP server address.
 
-=item X<port>-p, --port I<INT>
+=item X<fou>--fou I<ADDRESS>
 
-Listen for responses on port I<INT>.
+Send packet using FOU encapsulation (Foo over UDP).
 
-If this option is not given, the program listens on port I<68> unless the
-L<gateway|/gateway> option is given in which case it will listen on port I<67>.
+I<ADDRESS> can be given as I<HOST:PORT> or as just a port (number or name) in
+which case the host defaults to C<127.0.0.1>.
+
+If this option is given the outgoing packet is encapsulated and then sent to
+I<ADDRESS> which is responsible for decapsulating it.
+
+This option allows the program to send packets that it otherwsie cannot
+(because the user lacks permission to construct such packets).
+
+=item X<listen>-l, --listen I<ADDRESS>
+
+Listen for responses on I<ADDRESS>.
+
+If this option is not given, it defaults to I<68> unless the
+L<gateway|/gateway> option is given in which case it will default to I<67>.
 On most operating systems these low port numbers will usually need special
 permissions (like being C<root> on unix).
 
+I<ADDRESS> can be given as just a port (number or name) in which case the
+program will listen on all addresses or in the form of I<HOST:PORT> in which
+case it will listen on that specific I<IP> and I<PORT> combination.
+
 Since you have no control over to which port the DHCP server will send its
-responses using this option will normally mean the program won't see the
-response so only use this option if you have a cunning plan.
+responses using this option with a different port will normally mean the program
+won't see the response so only use this option if you have a cunning plan.
+
+Packets received on this interface are first checked for FOU encapsulation
+(irrespective of the use of the L<--fou|/fou> option). If they are encapsulated
+the packet is first decapsulated before further processing.
 
 =item X<timeout>-r, --timeout I<FLOAT>
 
@@ -377,10 +419,10 @@ A more complex example:
 
 Send a request on interface C<eth0> (-i) to C<10.253.0.8> (-s) for a host with
 MAC address C<01:02:03:04:05:06> (-m) and proposed hostname C<pluto> as a DHCP
-relay (-g). Once a DHCPOFFER is received send all followup requests to the DHCP
-server that answered (-T):
+relay (-g). Only accept answers from C<10.253.0.8> (-e). Once a DHCPOFFER is
+eceived send all followup requests to the DHCP server that answered (-T):
 
-   dhcp_test -s 10.253.0.8 -m 01:02:03:04:05:06 -H pluto -k -g -T -i eth0
+   dhcp_test -s 10.253.0.8 -e 10.253.0.8 -m 01:02:03:04:05:06 -H pluto -k -g -T -i eth0
 
 =head1 BUGS
 

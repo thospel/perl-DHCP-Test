@@ -12,8 +12,8 @@ use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC );
 use Errno qw(EINTR);
 
 use constant {
-    # This is the linux value. Can/will be different on a different OS
-    SO_BINDTODEVICE	=> 25,
+    # The linux value is 25. Can/will be different on a different OS
+    SO_BINDTODEVICE	=> Socket::SO_BINDTODEVICE(),
     BOOTPS		=> getservbyname("bootps", "udp") // 67,
     BOOTPC		=> getservbyname("bootpc", "udp") // 68,
     PROTO_UDP		=> getprotobyname("udp") // 17,
@@ -112,6 +112,7 @@ use constant {
 
 our $verbose;
 our $separator = "===============";
+
 use Exporter::Tidy
     socket  => [qw(BOOTPS BOOTPC PROTO_UDP SO_BINDTODEVICE)],
     options => [qw(OPTION_MASK OPTION_TIME_OFFSET OPTION_ROUTER
@@ -127,7 +128,7 @@ use Exporter::Tidy
            FORCERENEW LEASEQUERY LEASEUNASSIGNED LEASEUNKNOWN LEASEACTIVE
            BULKLEASEQUERY LEASEQUERYDONE ACTIVELEASEQUERY LEASEQUERYSTATUS TLS)],
     other => [qw($verbose $separator
-                 packet_send options_parse packet_receive
+                 parse_address packet_send options_parse packet_receive
                  message_type)];
 
 my $request_list =
@@ -206,6 +207,25 @@ my %message_type = (
     TLS()		=> "TLS",
 );
 
+my $IP_VERSION = 4;
+my $IHL = 5;
+my $UDP_HEADER = 8;
+my $DF = 2;
+my $TTL = 64;
+
+sub parse_address {
+    my ($str, $default_host, $default_port, $context) = @_;
+    my ($host, $port) = $str =~ /^(?:(.*):)?([^:]*)\z/ or
+        die "Could not parse $context '$str'\n";
+    $host = $default_host if !defined $host || $host eq "";
+    my $addr = inet_aton($host) || die "Could not resolve $context '$host'\n";
+    $port = $port eq "" ? $default_port // die "No port in $context '$str'" :
+        $port =~ /^0\z|^[1-9][0-9]*\z/ ? int($port) :
+        getservbyname($port, "udp") // die "Unknown UDP service '$port'\n";
+    die "Port '$port' is out of range" if $port >= 2**16;
+    return pack_sockaddr_in($port, $addr);
+}
+
 sub message_type {
     my ($type) = @_;
 
@@ -251,8 +271,137 @@ sub options_build {
     return $str . pack("W", OPTION_END);
 }
 
+sub fou {
+    my ($fou, $to, $txt) = @_;
+
+    my ($fou_port, $fou_addr) = unpack_sockaddr_in($fou);
+    my $fou_ip   = inet_ntoa($fou_addr);
+
+    socket(my $sender, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
+        die "Could not create socket: $^E";
+    connect($sender, $fou) or die "Could not connect to $fou_ip:$fou_port: $^E";
+
+    my ($dprt, $dst) = unpack_sockaddr_in($to);
+    my $sprt = BOOTPC;
+    # my $src = INADDR_ANY;
+    my $src = inet_aton("10.253.0.14");
+
+    my $packet_id = int rand 2**16;
+    my $flags = $DF;
+
+    my $length = length $txt;
+    my $new_length = $length + $IHL * 4 + $UDP_HEADER;
+    die "Packet too long" if $new_length >= 2**16;
+
+    my $header = pack("CCnnnCCx2a4a4",
+                      $IP_VERSION << 4 | $IHL,
+                      0,
+                      $new_length,
+                      $packet_id,
+                      $DF << 13 | 0,
+                      $TTL,
+                      PROTO_UDP,
+                      $src,
+                      $dst,
+                  );
+    my $sum = unpack("%32n*", $header);
+    while ($sum > 0xffff) {
+        my $carry = $sum >> 16;
+        $sum &= 0xffff;
+        $sum += $carry;
+    }
+    substr($header, 10, 2, pack("n", 0xffff - $sum));
+
+    my $pseudo10 = pack("a4a4xC", $src, $dst, PROTO_UDP);
+    my $udp_header = pack("nnn", $sprt, $dprt, $length + $UDP_HEADER);
+    $txt .= "\0";
+
+    $sum = unpack("%32n*", $pseudo10) + unpack("%32n*", $udp_header) + unpack("%32n*", $txt) + $length + $UDP_HEADER;
+
+    while ($sum > 0xffff) {
+        my $carry = $sum >> 16;
+        $sum &= 0xffff;
+        $sum += $carry;
+    }
+    chop $txt;
+    my $buffer = $header . $udp_header . pack("n", 0xffff - $sum || 0xffff) . $txt;
+
+    if ($verbose) {
+        my $buf = $buffer;
+        my ($ihl, $ecn, $length, $packet_id, $fragment, $ttl, $proto, $chksum, $src, $dst) = unpack("CCnnnCCna4a4", $buf);
+        my $version = $ihl >> 4;
+        $ihl &= 0xf;
+        my $flags = $fragment >> 13;
+        $fragment &= 0x1fff;
+        # only TCP4
+        $version == $IP_VERSION || die "Wrong version $version";
+        # Only UDP
+        $proto == PROTO_UDP || die "Wrong proto $proto";
+        # Sanity check on buffer
+        length($buf) == $length || die "Wrong length ", length($buf);
+        # We don't handle IP options (yet)
+        $ihl == $IHL || die "Wrong ihl $ihl";
+        # Too many hops
+        $ttl || die "Bad TTL $ttl";
+        # Don't handle fragments (fragment offset)
+        die "Unexpected fragment $fragment" if $fragment;
+        # Don't handle fragments (MF flag set)
+        die "Bad flags $flags" if $flags & 0x4;
+
+        my $pseudo10 = pack("a4a4xC", $src, $dst, $proto);
+
+        $ihl *= 4;
+        my $header = substr($buf, 0, $ihl, "");
+        $length -= $ihl;
+
+        # No buffer padding needed since length($header) is even
+        my $sum = unpack("%32n*", $header);
+        # We (currently) don't check the header chksum since we assume we only
+        # handle local packets which cannot fail
+        while ($sum > 0xffff) {
+            my $carry = $sum >> 16;
+            $sum &= 0xffff;
+            $sum += $carry;
+        }
+        $sum == 0xffff || die "Bad IP checksum $sum";
+
+        $src = inet_ntoa($src);
+        $dst = inet_ntoa($dst);
+
+        my $dscp = $ecn >> 3;
+        $ecn &= 0x7;
+        # print "HEADER: DSCP=$dscp, ECN=$ecn, ID=$packet_id, FLAGS=$flags, FRAGMENT=$fragment, TTL=$ttl, CHKSUM=$chksum, SUM=$sum, SRC=$src, DST=$dst\n";
+
+        # Must have space for UDP header
+        die "Bad UDP length $length" if $length < $UDP_HEADER;
+
+        # Pad buffer 0 so a last single byte still gets processed as "n"
+        $sum = unpack("%32n*", $buf . "\x0") + unpack("%32n*", $pseudo10) + $length;
+        my ($sprt, $dprt, $udp_len, $udp_chksum) = unpack("nnnn", substr($buf, 0, $UDP_HEADER, ""));
+        $udp_len == $length || die "Inconsistent UDP length";
+        $length -= $UDP_HEADER;
+
+        if ($udp_chksum) {
+            while ($sum > 0xffff) {
+                my $carry = $sum >> 16;
+                $sum &= 0xffff;
+                $sum += $carry;
+            }
+            $sum == 0xffff || die "Bad UDP chksum $sum";
+        }
+
+        # print "SPRT=$sprt, DPRT=$dprt, LEN=$udp_len, CHK=$udp_chksum\n" if $verbose;
+        print "Encapsulated FOU packet from $src:$sprt to $dst:$dprt\n" if $verbose;
+    }
+
+    my $rc = syswrite($sender, $buffer) //
+        die "Could not send message: $^E";
+    length $buffer == $rc ||
+        die "Sent truncated FOU DHCP message\n";
+}
+
 sub packet_send {
-    my ($type, $interface, $target, $xid, $gateway_ip, $mac,
+    my ($type, $fou, $interface, $target, $xid, $gateway_ip, $mac,
         $broadcast, $unicast, %options) = @_;
 
     my $ciaddr = INADDR_ANY;
@@ -277,11 +426,13 @@ sub packet_send {
     #    die "Could not setsockopt SO_REUSEADDR: $^E";
     # my $from = pack_sockaddr_in(BOOTPC, INADDR_ANY);
     # bind($sender, $from) or die "Could not bind: $^E";
+    # my $from = pack_sockaddr_in(0, inet_aton("192.168.59.142"));
+    #bind($sender, $from) or die "Could not bind: $^E";
     my $to   = pack_sockaddr_in(BOOTPS, $target);
     connect($sender, $to) or die "Could not connect: $^E";
     my $from = getsockname($sender) // die "Could not getsockname: $^E";
-        my ($port, $from_addr) = unpack_sockaddr_in($from);
-        my $from_ip = inet_ntoa($from_addr);
+    my ($port, $from_addr) = unpack_sockaddr_in($from);
+    my $from_ip = inet_ntoa($from_addr);
     $gateway_ip = $from_ip if defined $gateway_ip && $gateway_ip eq "";
     if (!$mac) {
         $if //= IO::Interface::Simple->new_from_address($from_ip) //
@@ -313,12 +464,16 @@ sub packet_send {
                                    message_type => $type);
     #my $pad = PACKET_SIZE - length $buffer;
     #die "Packet too long" if $pad < 0;
-    my $rc = syswrite($sender, $buffer) //
-        die "Could not send message: $^E";
+    if ($fou) {
+        fou($fou, $to, $buffer);
+    } else {
+        my $rc = syswrite($sender, $buffer) //
+            die "Could not send message: $^E";
+        length $buffer == $rc ||
+            die "Sent truncated DHCP message\n";
+    }
     printf("%s\nDHCP%s sent to %s\n",
            $separator, message_type($type), inet_ntoa($target)) if $verbose;
-    length $buffer == $rc ||
-        die "Sent truncated DHCP message\n";
     return $mac;
 }
 
@@ -408,7 +563,80 @@ sub packet_receive {
             die "Could not sysread: $^E";
         my ($server_port, $server_addr) = unpack_sockaddr_in($server) or
             die "Could not decode UDP sender address";
+        my $server_ip = inet_ntoa($server_addr);
+        if (ord $buffer == ($IP_VERSION << 4 | $IHL)) {
+            # May be FOU encapsulated packet
+            next if length $buffer < 20;
+            my ($ihl, $ecn, $length, $id, $fragment, $ttl, $proto, $chksum, $src, $dst) = unpack("CCnnnCCna4a4", $buffer);
+            # print STDERR "TEMP: IHL=$ihl, ECN=$ecn, LEN=$length, ID=$id, FRAGMENT=$fragment, TTL=$ttl, PROTO=$proto, CHK=$chksum, SRC=$src, DST=$dst\n";
+            my $version = $ihl >> 4;
+            $ihl &= 0xf;
+            my $flags = $fragment >> 13;
+            $fragment &= 0x1fff;
+            # only TCP4
+            $version == $IP_VERSION || next;
+            # Only UDP
+            $proto == PROTO_UDP || next;
+            # Sanity check on buffer
+            length($buffer) == $length || next;
+            # We don't handle IP options (yet)
+            $ihl == $IHL || next;
+            # Too many hops
+            $ttl || next;
+            # Don't handle fragments (fragment offset)
+            next if $fragment;
+            # Don't handle fragments (MF flag set)
+            next if $flags & 0x4;
 
+            my $pseudo10 = pack("a4a4xC", $src, $dst, $proto);
+
+            $ihl *= 4;
+            my $header = substr($buffer, 0, $ihl, "");
+            $length -= $ihl;
+
+            # No buffer padding needed since length($header) is even
+            my $sum = unpack("%32n*", $header);
+            while ($sum > 0xffff) {
+                my $carry = $sum >> 16;
+                $sum &= 0xffff;
+                $sum += $carry;
+            }
+            $sum == 0xffff || next;
+
+            # print "Sender $server_ip:$server_port\n";
+
+            $src = inet_ntoa($src);
+            $dst = inet_ntoa($dst);
+
+            my $dscp = $ecn >> 3;
+            $ecn &= 0x7;
+            # print "HEADER: DSCP=$dscp, ECN=$ecn, ID=$id, FLAGS=$flags, FRAGMENT=$fragment, TTL=$ttl, CHKSUM=$chksum, SRC=$src, DST=$dst\n" if $verbose;
+
+            # Must have space for UDP header
+            next if $length < $UDP_HEADER;
+
+            # Pad buffer 0 so a last single byte still gets processed as "n"
+            $sum = unpack("%32n*", $buffer . "\x0") + unpack("%32n*", $pseudo10) + $length;
+            my ($sprt, $dprt, $udp_len, $udp_chksum) = unpack("nnnn", substr($buffer, 0, $UDP_HEADER, ""));
+            $udp_len == $length || die "Inconsistent UDP length";
+            $length -= $UDP_HEADER;
+
+            if ($udp_chksum) {
+                while ($sum > 0xffff) {
+                    my $carry = $sum >> 16;
+                    $sum &= 0xffff;
+                    $sum += $carry;
+                }
+                $sum == 0xffff || next;
+            }
+
+            $server_ip = $src;
+            $server_addr = inet_aton($src);
+            $server_port = $sprt;
+            print "Decapsulated FOU packet from $src:$sprt to $dst:$dprt, LEN=$udp_len\n" if $verbose;
+        }
+
+        $server_port == BOOTPS || next;
         my ($op, $hw_type, $hw_len, $hops,
             $reply_xid, $secs, $flags,
             $client_addr, $your_addr, $boot_addr, $gateway_addr,
@@ -423,7 +651,7 @@ sub packet_receive {
         $hw_addr = substr($hw_addr, 0, $hw_len);
         $hw_addr eq $mac || next;
         printf "%s\nReply (length %d) from %s:%d for %s\n",
-            $separator, length $buffer, inet_ntoa($server_addr), $server_port,
+            $separator, length $buffer, $server_ip, $server_port,
             unpack("H*", $hw_addr) if $verbose;
         $hw_type == HW_ETHERNET || next;
         $reply_xid == $xid || next;
@@ -485,7 +713,8 @@ EOF
                 $verbose && $option{boot_file} ne "";
         }
         exists $option{server} || die "Missing server identifier in DHCP reply";
-        $option{server} eq $server_addr || die "Inconsistent server";
+        $option{server} eq $server_addr ||
+            die sprintf("Inconsistent server: Received packet from %s but server identifier in packet is %s", $server_ip, inet_ntoa($option{server}));
 
         # On my net the router can send a NAK even though the router does
         # not mot match the server identifier. So we should do a perl "next" if
