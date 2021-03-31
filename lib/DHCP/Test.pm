@@ -214,12 +214,19 @@ my $DF = 2;
 my $TTL = 64;
 
 sub parse_address {
-    my ($str, $default_host, $default_port, $context) = @_;
-    my ($host, $port) = $str =~ /^(?:(.*):)?([^:]*)\z/ or
+    my ($str, $context, $default_host, $default_port, $prefer_host) = @_;
+
+    my ($host, $port) = $prefer_host ?
+        $str =~ /^(?:(.*))(:[^:]*)?\z/ :
+        $str =~ /^(?:(.*):)?([^:]*)\z/ or
         die "Could not parse $context '$str'\n";
-    $host = $default_host if !defined $host || $host eq "";
+    if (!defined $host) {
+        $host = $default_host // "127.0.0.1";
+    } elsif ($host eq "") {
+        $host = $default_host // "0.0.0.0";
+    }
     my $addr = inet_aton($host) || die "Could not resolve $context '$host'\n";
-    $port = $port eq "" ? $default_port // die "No port in $context '$str'" :
+    $port = $port eq "" ? $default_port // die "No port in $context '$str'\n" :
         $port =~ /^0\z|^[1-9][0-9]*\z/ ? int($port) :
         getservbyname($port, "udp") // die "Unknown UDP service '$port'\n";
     die "Port '$port' is out of range" if $port >= 2**16;
@@ -428,7 +435,7 @@ sub packet_send {
     # bind($sender, $from) or die "Could not bind: $^E";
     # my $from = pack_sockaddr_in(0, inet_aton("192.168.59.142"));
     #bind($sender, $from) or die "Could not bind: $^E";
-    my $to   = pack_sockaddr_in(BOOTPS, $target);
+    my $to = pack_sockaddr_in(BOOTPS, $target);
     connect($sender, $to) or die "Could not connect: $^E";
     my $from = getsockname($sender) // die "Could not getsockname: $^E";
     my ($port, $from_addr) = unpack_sockaddr_in($from);
@@ -438,11 +445,11 @@ sub packet_send {
         $if //= IO::Interface::Simple->new_from_address($from_ip) //
             die "Could not get local interface for IP $from_ip";
         $mac = $if->hwaddr //
-            die "Could not get MAC address of interface $if";
-        my @mac = map hex, split /:/, $mac;
-        @mac == 6 || die "Invalid MAC length";
-        $_ <= 0xff || die "Invalid value in MAC" for @mac;
-        $mac = pack("W*", @mac);
+            croak "Could not get MAC address from interface address $from_ip";
+        $mac =~ /^[0-9A-F]{2}(?::[0-9A-F]{2}){5}\z/i ||
+            die "Assertion: Invalid MAC address '$mac'";
+        $mac =~ tr/://d;
+        $mac = pack("H*", $mac);
     }
 
     my $buffer = pack("W4Nnna4x4x4a4a16x192N",
@@ -564,6 +571,7 @@ sub packet_receive {
         my ($server_port, $server_addr) = unpack_sockaddr_in($server) or
             die "Could not decode UDP sender address";
         my $server_ip = inet_ntoa($server_addr);
+        # print "PACKET from $server_ip:$server_port\n" if $verbose;
         if (ord $buffer == ($IP_VERSION << 4 | $IHL)) {
             # May be FOU encapsulated packet
             next if length $buffer < 20;
@@ -673,16 +681,16 @@ sub packet_receive {
             hw_addr	=> $hw_addr,
         );
         defined $options || die "Truncated DHCP reply";
-        my $hw = unpack("H*", $option{hw_addr});
+        my $hw = uc unpack("H*", $option{hw_addr});
         $hw =~ s/(..)\B/$1:/g;
         print <<"EOF" if $verbose
 op=$op, hw_type=$hw_type, hw_len=$hw_len, hops=$hops
 xid=$option{xid_ip} secs=$secs, flags=$flags
-client IP $option{client_ip}
-Your   IP $option{your_ip}
-Server IP $option{server_ip}
-Gate   IP $option{gateway_ip}
-MAC    $hw
+client IP: $option{client_ip}
+Your   IP: $option{your_ip}
+Server IP: $option{server_ip}
+Gate   IP: $option{gateway_ip}
+MAC: $hw
 EOF
             ;
         options_parse(\%option, $options);

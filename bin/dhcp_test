@@ -43,7 +43,7 @@ use DHCP::Test::Package;
 my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
 my $hostname_local = hostname();
 $hostname_local =~ s/\..*//sg;
-my $timeout = 1;
+my $timeout = 1.2;
 my $retries = 3;
 
 die "Could not parse your command line. Try $0 -h\n" unless
@@ -52,7 +52,7 @@ die "Could not parse your command line. Try $0 -h\n" unless
                "r|retries=o"	=> \$retries,
                "t|timeout=f"	=> \$timeout,
                "i|interface=s"	=> \my $interface,
-               "m|mac=s"	=> \my $mac,
+               "m|mac:s"	=> \my $mac,
                "H|hostname:s"	=> \my $hostname,
                "l|listen=s"	=> \my $listen,
                # do DHCP relay request. Answer is on port 67. Not supported yet
@@ -92,15 +92,23 @@ my $expect_addr = defined $expect_ip ?
     undef;
 $xid = unpack("N", inet_aton($xid) // die "Could not resolve xid '$xid'");
 if (defined $mac) {
-    my @mac = map hex, split /:/, $mac;
-    @mac == 6 || die "Invalid MAC length";
-    $_ <= 0xff || die "Invalid value in MAC" for @mac;
-    $mac = pack("W*", @mac);
+    $mac =~ /^[0-9A-F:. ]*\z/i || die "Invalid MAC '$mac'\n";
+    $mac =~ s{([0-9A-F]+)}{length($1) % 2 ? "0$1" : $1}eig;
+    $mac =~ tr/:. //d;
+    $mac = pack("H*", $mac);
+    if (length $mac != 6) {
+        length $mac < 6 || die "Invalid MAC length";
+        if (length $mac == 5) {
+            $mac .= pack("W", $$ & 0xff);
+        } else {
+            $mac = substr($mac . pack("nN", $$ & 0xffff, rand 2**32), 0, 6);
+        }
+    }
 }
 $broadcast = 1 if !defined $broadcast && !$server_ip;
 my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
     die "Could not resolve server IP '$server_ip'";
-$fou = parse_address($fou, "127.0.0.1", undef, "fou receiver") if defined $fou;
+$fou = parse_address($fou, "fou receiver", "127.0.0.1") if defined $fou;
 
 socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
     die "Could not create socket: $^E";
@@ -110,9 +118,9 @@ socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
 #    die "Could not setsockopt SO_REUSEADDR: $^E";
 my $from = parse_address(
     $listen // "",
+    "listen address",
     "0.0.0.0",
-    defined $gateway_ip ? BOOTPS : BOOTPC,
-    "listen address");
+    defined $gateway_ip ? BOOTPS : BOOTPC);
 if (!bind($recv, $from)) {
     my ($port, $addr) = unpack_sockaddr_in($from);
     my $ip = inet_ntoa($addr);
@@ -187,7 +195,7 @@ dhcp_test - Do a test DHCP exchange
 
 =head1 SYNOPSIS
 
- dcp_test [-v|--verbose] [-k|--keep] [-m|-mac <string>] [--xid <INT>]
+ dcp_test [-v|--verbose] [-k|--keep] [-m|-mac [<string>]] [--xid <INT>]
           [-H|--hostname [<string>]] [-e|--expect <IP>] [--fou <ADDRESS>]
           [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
           [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
@@ -227,6 +235,13 @@ is not given the MAC address of the sending interface will be used.
 
 The program currently only supports ethernet.
 
+It is valid to pass a too short MAC string. In that case the mac will get padded
+with somewhat random bytes. For example using
+
+   --mac 00:00:6C
+
+will generate a MAC address not used by any real device
+
 =item X<xis>--xid I<INT>
 
 Use I<INT> as transaction identifier. Can also be given as an I<IP> which is
@@ -248,7 +263,10 @@ If this option is given only a DHCPOFFER from the DHCP server with the given
 I<IP> will be selected.
 
 The sender of the selected DHCPOFFER (irrespective of the value of this option)
-will always be used for selection in the following steps.
+will always be used for DHCP response selection in the following steps.
+
+All DHCP responses (not just DHCPOFFER) are checked for coming from port 67
+(irrespective of the value of this option.
 
 =item X<server>-s, --server I<IP>
 
@@ -415,18 +433,46 @@ Do normal DHCP broadcasts, but only accept offers from a specific DHCP server:
 
    dhcp_test -e IP
 
-A more complex example:
+A very complex example:
 
-Send a request on interface C<eth0> (-i) to C<10.253.0.8> (-s) for a host with
-MAC address C<01:02:03:04:05:06> (-m) and proposed hostname C<pluto> as a DHCP
-relay (-g). Only accept answers from C<10.253.0.8> (-e). Once a DHCPOFFER is
-eceived send all followup requests to the DHCP server that answered (-T):
+Send a request on interface C<eth0> (-i) to C<0.0.0.1> (-s) for a host with
+randomly generated MAC address C<00:00:6C:XX:XX:XX> (-m) and proposed hostname
+C<pluto> (-H) as a DHCP relay that expects an answer to 10.254.0.14 (-g). Only
+accept answers from C<10.253.0.8> (-e). Once a DHCPOFFER is received send all
+followup requests to the DHCP server that answered (-T). Once the DHCP server
+gives us an IP address we hold one to it (-k). Send using FOU over port 1237 and
+listen for (FOU) answers on port C<1236> (-l)
 
-   dhcp_test -s 10.253.0.8 -e 10.253.0.8 -m 01:02:03:04:05:06 -H pluto -k -g -T -i eth0
+   dhcp_test -s 0.0.0.1 -e 10.253.0.8 -m 00:00:6C -H pluto -k -g 10.254.0.14 -T -i eth0 -l 1236 --fou 1237
+
+We assume here we are running on C<10.254.0.8> which is also the host with a
+DHCP server (which snoops the otherwise meaningless packets to C<0.0.0.1>). So
+we won't seee the answer to C<10.254.0.14> and would normally time out. On linux
+we can set up a FOU tunnel that catches the response:
+
+   # Set up FOU tunnel. Notice that we listen on the output port of the tunnel
+   ip link add name fou1 type ipip remote 127.0.0.1 local 127.0.0.1 ttl 225 encap fou encap-sport auto encap-dport 1236
+   ip addr add 10.253.4.1/24 dev fou1
+   # Decapsulator
+   ip fou add port 1237 ipproto 4 local 127.0.0.1
+
+   # Allow these weird outgoing FOU packets
+   sysctl -w net.ipv4.conf.all.rp_filter=0
+   sysctl -w net.ipv4.conf.fou1.rp_filter=0
+
+   # Match DHCP replies about MAC address 00:00:6C:XX:XX:XX
+   # Leave operational DHCP replies alone
+   iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@35&0xffffff=0x6c" -j MARK --set-mark 17
+
+   # Make marked packets use routing plane 101
+   ip rule add fwmark 17 lookup 101
+
+   # Route everything in routing plane 101 to the FOU tunnel:
+   # ip route add default via 10.253.4.1 table 101
 
 =head1 BUGS
 
-None known
+Only supports IPV4
 
 =head1 SEE ALSO
 
