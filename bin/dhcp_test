@@ -4,6 +4,59 @@
 use strict;
 use warnings;
 
+=begin comment
+On 10.253.0.8
+
+# Set up FOU tunnel. Notice that we listen on the output port of the tunnel
+ip link add name fou1 type ipip remote 127.0.0.1 local 127.0.0.1 ttl 225 encap fou encap-sport auto encap-dport 1236
+ip addr add 10.253.4.1/24 dev fou1
+# Decapsulator
+ip fou add port 1237 ipproto 4 local 127.0.0.1
+
+# Allow these weird outgoing FOU packets
+sysctl -w net.ipv4.conf.all.rp_filter=0
+sysctl -w net.ipv4.conf.fou1.rp_filter=0
+
+# Match DHCP replies about MAC address 00:00:6C:XX:XX:XX
+# Leave operational DHCP replies alone
+iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@35&0xffffff=0x6c" -j MARK --set-mark 17
+
+# Make marked packets use routing plane 101
+ip rule add fwmark 17 lookup 101
+
+# Route everything in routing plane 101 to the FOU tunnel:
+# ip route add default via 10.253.4.1 table 101
+
+# Experiments with -t nat failed because this implicitely uses tracked
+# connections and all these port 67 to port 67 packets fall into the same
+# connection. And since the nat is only done on the first packet for the tracked
+# connection it means that effectively the the MAC match gets ignored
+
+# Now this works (on 10.253.0.8):
+dhcp_test -v -g 10.254.0.14  -s 0.0.0.1 -l 1236 -r 0 -e 10.253.0.8 -m 00:00:6C --fou 1237
+# Notice that -s <local address> like 0.0.0.0, 255.255.255.255, 10.235.0.8 etc
+# all fail. The reason is unclear. The DHCPDISCOVER packet is generated (you
+# can tcpdump it on interface fou1, and strace shows that the DHCP server
+# receives it, but it gets ignored. It seems that any visible IP address fails
+# you must use something that isn't assigned to any host for -s to work.
+# This needs to be traced in the dhcp executable to understand this
+
+# Experiments with tc filter nat also failed. It works for a specific -g target
+# but I seem to be unable to map a range of destination addresses to a single
+# destination address. I always get a mask of /32 however I add the filter
+# Either I do something wrong or its a bug or what I want is impossible:
+#
+# ptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@35&0xffffff=0x6c" -j MARK --set-mark 18
+# tc qdisc del add eno1 root handle 1 htb
+# tc filter add dev eno1 parent 1: protocol ip prio 8 handle 18 fw action nat ingress any 10.253.0.14/16
+# tc filter show dev eno1
+
+# nftables should be abnle to do static NAT, but my system is currently iptables
+
+=end comment
+
+=cut
+
 our $VERSION = "1.000";
 
 use FindBin qw($Script);
@@ -438,12 +491,11 @@ A very complex example:
 Send a request on interface C<eth0> (-i) to C<0.0.0.1> (-s) for a host with
 randomly generated MAC address C<00:00:6C:XX:XX:XX> (-m) and proposed hostname
 C<pluto> (-H) as a DHCP relay that expects an answer to 10.254.0.14 (-g). Only
-accept answers from C<10.253.0.8> (-e). Once a DHCPOFFER is received send all
-followup requests to the DHCP server that answered (-T). Once the DHCP server
-gives us an IP address we hold one to it (-k). Send using FOU over port 1237 and
-listen for (FOU) answers on port C<1236> (-l)
+accept answers from C<10.253.0.8> (-e). Once the DHCP server gives us an IP
+address we hold one to it (-k). Send using FOU over port 1237 and listen for
+(FOU) answers on port C<1236> (-l)
 
-   dhcp_test -s 0.0.0.1 -e 10.253.0.8 -m 00:00:6C -H pluto -k -g 10.254.0.14 -T -i eth0 -l 1236 --fou 1237
+   dhcp_test -s 0.0.0.1 -e 10.253.0.8 -m 00:00:6C -H pluto -k -g 10.254.0.14 -i eth0 -l 1236 --fou 1237
 
 We assume here we are running on C<10.254.0.8> which is also the host with a
 DHCP server (which snoops the otherwise meaningless packets to C<0.0.0.1>). So

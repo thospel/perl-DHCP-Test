@@ -108,6 +108,10 @@ use constant {
     REQUEST_MTU			=>  26,
     REQUEST_DOMAIN_SEARCH	=> 119,
     REQUEST_ROUTE_STATIC	=> 121,
+
+    MULTICAST_BEGIN => inet_aton("224.0.0.0") // die("Assertion: Bad address"),
+    # multicast range *excludes* this END address
+    MULTICAST_END   => inet_aton("240.0.0.0") // die("Assertion: Bad address"),
 };
 
 our $verbose;
@@ -212,6 +216,7 @@ my $IHL = 5;
 my $UDP_HEADER = 8;
 my $DF = 2;
 my $TTL = 64;
+my $TTL_LOW = 2;
 
 sub parse_address {
     my ($str, $context, $default_host, $default_port, $prefer_host) = @_;
@@ -291,7 +296,7 @@ sub fou {
     my ($dprt, $dst) = unpack_sockaddr_in($to);
     my $sprt = BOOTPC;
     # my $src = INADDR_ANY;
-    my $src = inet_aton("10.253.0.14");
+    my $src = inet_aton("0.0.0.1");
 
     my $packet_id = int rand 2**16;
     my $flags = $DF;
@@ -306,7 +311,8 @@ sub fou {
                       $new_length,
                       $packet_id,
                       $DF << 13 | 0,
-                      $TTL,
+                      # Avoid real outgoing packet if we are sending to 0.X.X.X
+                      $dst =~ /^\0/ ? $TTL_LOW : $TTL,
                       PROTO_UDP,
                       $src,
                       $dst,
@@ -333,7 +339,7 @@ sub fou {
     chop $txt;
     my $buffer = $header . $udp_header . pack("n", 0xffff - $sum || 0xffff) . $txt;
 
-    if ($verbose) {
+    if (0) {
         my $buf = $buffer;
         my ($ihl, $ecn, $length, $packet_id, $fragment, $ttl, $proto, $chksum, $src, $dst) = unpack("CCnnnCCna4a4", $buf);
         my $version = $ihl >> 4;
@@ -353,7 +359,7 @@ sub fou {
         # Don't handle fragments (fragment offset)
         die "Unexpected fragment $fragment" if $fragment;
         # Don't handle fragments (MF flag set)
-        die "Bad flags $flags" if $flags & 0x4;
+        die "Bad flags $flags" if $flags & 0x1;
 
         my $pseudo10 = pack("a4a4xC", $src, $dst, $proto);
 
@@ -377,7 +383,7 @@ sub fou {
 
         my $dscp = $ecn >> 3;
         $ecn &= 0x7;
-        # print "HEADER: DSCP=$dscp, ECN=$ecn, ID=$packet_id, FLAGS=$flags, FRAGMENT=$fragment, TTL=$ttl, CHKSUM=$chksum, SUM=$sum, SRC=$src, DST=$dst\n";
+        print "HEADER: DSCP=$dscp, ECN=$ecn, ID=$packet_id, FLAGS=$flags, FRAGMENT=$fragment, TTL=$ttl, CHKSUM=$chksum, SUM=$sum, SRC=$src, DST=$dst\n" if $verbose;
 
         # Must have space for UDP header
         die "Bad UDP length $length" if $length < $UDP_HEADER;
@@ -397,7 +403,7 @@ sub fou {
             $sum == 0xffff || die "Bad UDP chksum $sum";
         }
 
-        # print "SPRT=$sprt, DPRT=$dprt, LEN=$udp_len, CHK=$udp_chksum\n" if $verbose;
+        print "SPRT=$sprt, DPRT=$dprt, LEN=$udp_len, CHK=$udp_chksum\n" if $verbose;
         print "Encapsulated FOU packet from $src:$sprt to $dst:$dprt\n" if $verbose;
     }
 
@@ -436,6 +442,7 @@ sub packet_send {
     # my $from = pack_sockaddr_in(0, inet_aton("192.168.59.142"));
     #bind($sender, $from) or die "Could not bind: $^E";
     my $to = pack_sockaddr_in(BOOTPS, $target);
+    # connect($sender, $fou ? pack_sockaddr_in(BOOTPS, inet_aton("0.0.0.2")) : $to) or die "Could not connect: $^E";
     connect($sender, $to) or die "Could not connect: $^E";
     my $from = getsockname($sender) // die "Could not getsockname: $^E";
     my ($port, $from_addr) = unpack_sockaddr_in($from);
@@ -567,7 +574,7 @@ sub packet_receive {
         }
 
         my $server = recv($socket, my $buffer, BLOCK_SIZE, 0) //
-            die "Could not sysread: $^E";
+            die "Could not recv: $^E";
         my ($server_port, $server_addr) = unpack_sockaddr_in($server) or
             die "Could not decode UDP sender address";
         my $server_ip = inet_ntoa($server_addr);
@@ -577,6 +584,10 @@ sub packet_receive {
             next if length $buffer < 20;
             my ($ihl, $ecn, $length, $id, $fragment, $ttl, $proto, $chksum, $src, $dst) = unpack("CCnnnCCna4a4", $buffer);
             # print STDERR "TEMP: IHL=$ihl, ECN=$ecn, LEN=$length, ID=$id, FRAGMENT=$fragment, TTL=$ttl, PROTO=$proto, CHK=$chksum, SRC=$src, DST=$dst\n";
+
+            # Skip spammy multicast stuff
+            next if MULTICAST_BEGIN le $dst && $dst lt MULTICAST_END;
+
             my $version = $ihl >> 4;
             $ihl &= 0xf;
             my $flags = $fragment >> 13;
@@ -589,12 +600,12 @@ sub packet_receive {
             length($buffer) == $length || next;
             # We don't handle IP options (yet)
             $ihl == $IHL || next;
-            # Too many hops
+            # Too many hops. If 0 the packet shouldn't have been send anyways
             $ttl || next;
             # Don't handle fragments (fragment offset)
             next if $fragment;
             # Don't handle fragments (MF flag set)
-            next if $flags & 0x4;
+            next if $flags & 0x1;
 
             my $pseudo10 = pack("a4a4xC", $src, $dst, $proto);
 
