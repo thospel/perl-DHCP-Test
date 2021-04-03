@@ -88,163 +88,194 @@ use DHCP::Test qw($verbose $separator
                   SO_BINDTODEVICE PROTO_UDP BOOTPC BOOTPS
                   DISCOVER OFFER REQUEST ACK RELEASE
                   OPTION_HOSTNAME OPTION_REQUEST_IP OPTION_SERVER
-                  parse_address packet_send packet_receive);
+                  parse_address packet_send packet_receive message_type);
 use DHCP::Test::Package;
 
-# Client chosen ID to match answers
-# my $xid = "41.42.43.44";
-my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
-my $hostname_local = hostname();
-$hostname_local =~ s/\..*//sg;
-my $timeout = 1.5;
-my $retries = 2;
+$| = 1;
 
-die "Could not parse your command line. Try $0 -h\n" unless
-    GetOptions("v|verbose!"	=> \$verbose,
-               "xid=s"		=> \$xid,
-               "r|retries=o"	=> \$retries,
-               "t|timeout=f"	=> \$timeout,
-               "i|interface=s"	=> \my $interface,
-               "m|mac:s"	=> \my $mac,
-               "H|hostname:s"	=> \my $hostname,
-               "l|listen=s"	=> \my $listen,
-               # do DHCP relay request. Answer is on port 67. Not supported yet
-               "g|gateway:s"	=> \my $gateway_ip,
-               "u|unicast!"	=> \my $unicast,
-               "b|broadcast!"	=> \my $broadcast,
-               "T|track!"	=> \my $track,
-               # Do not broadcast but send to specific DHCP server
-               "s|server=s"	=> \my $server_ip,
-               # Only accept answer from specific DHCP server
-               "e|expect=s"	=> \my $expect_ip,
-               "k|keep!"	=> \my $keep,
-               "fou=s"		=> \my $fou,
-               "version!"	=> \my $version,
-               "U|unsafe!"	=> \my $unsafe,
-               "h|help!"	=> \my $help);
+my ($nagios, $result);
+$verbose = 0;
+eval {
+    # Client chosen ID to match answers
+    # my $xid = "41.42.43.44";
+    my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
+    my $hostname_local = hostname();
+    $hostname_local =~ s/\..*//sg;
+    my $timeout = 1.5;
+    my $retries = 2;
 
-if ($version) {
-    ## no critic (UselessNoCritic RequireCheckedSyscalls)
-    print<<"EOF";
+    die "Could not parse your command line. Try $0 -h\n" unless
+        GetOptions("v|verbose+"	=> \$verbose,
+                   "xid=s"		=> \$xid,
+                   "r|retries=o"	=> \$retries,
+                   "t|timeout=f"	=> \$timeout,
+                   "i|interface=s"	=> \my $interface,
+                   "m|mac:s"		=> \my $mac,
+                   "H|hostname:s"	=> \my $hostname,
+                   "l|listen=s"		=> \my $listen,
+                   # do DHCP relay request. Answer is on port 67. Not supported yet
+                   "g|gateway:s"	=> \my $gateway_ip,
+                   "u|unicast!"		=> \my $unicast,
+                   "b|broadcast!"	=> \my $broadcast,
+                   "T|track!"		=> \my $track,
+                   # Do not broadcast but send to specific DHCP server
+                   "s|server=s"		=> \my $server_ip,
+                   # Only accept answer from specific DHCP server
+                   "e|expect=s"		=> \my $expect_ip,
+                   "R|request!"		=> \my $request,
+                   "k|keep!"		=> \my $keep,
+                   "N|nagios!"		=> \$nagios,
+                   "fou=s"		=> \my $fou,
+                   "version!"		=> \my $version,
+                   "U|unsafe!"		=> \my $unsafe,
+                   "h|help!"		=> \my $help);
+
+    if ($version) {
+        ## no critic (UselessNoCritic RequireCheckedSyscalls)
+        print <<"EOF";
 dhcp_test $VERSION (DHCP::Test $DHCP::Test::Package::VERSION)
 EOF
-    exit 0;
-}
-if ($help) {
-    require Config;
-    $ENV{PATH} .= ":" unless $ENV{PATH} eq "";
-    $ENV{PATH} = "$ENV{PATH}$Config::Config{'installscript'}";
-    exit system("perldoc", "-F", $unsafe ? "-U" : (), "$Bin/$Script") ? 1 : 0;
-    # make parser happy
-    %Config::Config = ();
-}
-
-$hostname = $hostname_local if defined $hostname && $hostname eq "";
-my $expect_addr = defined $expect_ip ?
-    inet_aton($expect_ip) || die("Could not resolve expect IP '$expect_ip'") :
-    undef;
-$xid = unpack("N", inet_aton($xid) // die "Could not resolve xid '$xid'");
-if (defined $mac) {
-    $mac =~ /^[0-9A-FX:. ]*\z/i || die "Invalid MAC '$mac'\n";
-    $mac =~ s{([0-9A-FX]+)}{length($1) % 2 ? "0$1" : $1}eig;
-    $mac =~ tr/a-fx:. /A-FX/d;
-print "MAC=$mac\n";
-    length $mac == 12 || die "Invalid MAC length";
-    if (my $x = $mac =~ tr/X//) {
-        my $now = time();
-        my $replace = substr(sprintf("%02X%04X%04X%02X",
-                                     rand(2**8),
-                                     $now & 0xffff,
-                                     rand(2**16),
-                                     $$ & 0xff), -$x);
-        # print "Replace=$replace\n";
-        $mac =~ s{X}{die "Assertion: out of replace bytes" if $replace eq "";
-                     substr($replace, 0, 1, "")}eg;
+        exit 0;
     }
-    $mac = pack("H*", $mac);
-}
-$broadcast = 1 if !defined $broadcast && !$server_ip;
-my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
-    die "Could not resolve server IP '$server_ip'";
-$fou = parse_address($fou, "fou receiver", "127.0.0.1") if defined $fou;
+    if ($help) {
+        require Config;
+        $ENV{PATH} .= ":" unless $ENV{PATH} eq "";
+        $ENV{PATH} = "$ENV{PATH}$Config::Config{'installscript'}";
+        exit system("perldoc", "-F", $unsafe ? "-U" : (), "$Bin/$Script") ? 1 : 0;
+        # make parser happy
+        %Config::Config = ();
+    }
 
-socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
-    die "Could not create socket: $^E";
-#setsockopt($recv, SOL_SOCKET, SO_BROADCAST, 1) ||
-#    die "Could not setsockopt SO_BROADCAST: $^E";
-# setsockopt($recv, SOL_SOCKET, SO_REUSEADDR, 1) ||
-#    die "Could not setsockopt SO_REUSEADDR: $^E";
-my $from = parse_address(
-    $listen // "",
-    "listen address",
-    "0.0.0.0",
-    defined $gateway_ip ? BOOTPS : BOOTPC);
-if (!bind($recv, $from)) {
-    my ($port, $addr) = unpack_sockaddr_in($from);
-    my $ip = inet_ntoa($addr);
-    die "Could not bind to $ip:$port: $^E";
-}
-$recv->blocking(0);
+    ++$verbose if !$nagios && $verbose;
+    $request //= -1;
+    $hostname = $hostname_local if defined $hostname && $hostname eq "";
+    my $expect_addr = defined $expect_ip ?
+        inet_aton($expect_ip) || die("Could not resolve expect IP '$expect_ip'") :
+        undef;
+    $xid = unpack("N", inet_aton($xid) // die "Could not resolve xid '$xid'");
+    if (defined $mac) {
+        $mac =~ /^[0-9A-FX:. ]*\z/i || die "Invalid MAC '$mac'\n";
+        $mac =~ s{([0-9A-FX]+)}{length($1) % 2 ? "0$1" : $1}eig;
+        $mac =~ tr/a-fx:. /A-FX/d;
+        length $mac == 12 || die "Invalid MAC length";
+        if (my $x = $mac =~ tr/X//) {
+            my $now = time();
+            my $replace = substr(sprintf("%02X%04X%04X%02X",
+                                         rand(2**8),
+                                         $now & 0xffff,
+                                         rand(2**16),
+                                         $$ & 0xff), -$x);
+            $mac =~ s{X}{die "Assertion: out of replace bytes" if $replace eq "";
+                         substr($replace, 0, 1, "")}eg;
+        }
+        $mac = pack("H*", $mac);
+    }
+    $broadcast = 1 if !defined $broadcast && !$server_ip;
+    my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
+        die "Could not resolve server IP '$server_ip'";
+    $fou = parse_address($fou, "fou receiver", "127.0.0.1") if defined $fou;
 
-my $options1;
-for my $try (0..$retries) {
-    # DISCOVER
-    $mac = packet_send(DISCOVER,
-                       $fou, $interface, $server_addr, $xid, $gateway_ip, $mac,
-                       $broadcast, $unicast,
-                       defined $hostname ? (hostname => $hostname) : ());
+    socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
+        die "Could not create socket: $^E";
+    #setsockopt($recv, SOL_SOCKET, SO_BROADCAST, 1) ||
+    #    die "Could not setsockopt SO_BROADCAST: $^E";
+    # setsockopt($recv, SOL_SOCKET, SO_REUSEADDR, 1) ||
+    #    die "Could not setsockopt SO_REUSEADDR: $^E";
+    my $from = parse_address(
+        $listen // "",
+        "listen address",
+        "0.0.0.0",
+        defined $gateway_ip ? BOOTPS : BOOTPC);
+    if (!bind($recv, $from)) {
+        my ($port, $addr) = unpack_sockaddr_in($from);
+        my $ip = inet_ntoa($addr);
+        die "Could not bind to $ip:$port: $^E";
+    }
+    $recv->blocking(0);
 
-    # OFFER
-    last if
-        $options1 = packet_receive($recv, $timeout, $xid, $expect_addr, $mac);
-    print "OFFER receive timed out\n" if $verbose;
-}
-if (!$options1) {
-    print "Max retries reached\n" if $verbose;
-    exit 1;
-}
-$options1->{message_type} == OFFER ||
-    die "Unexpected reply type $options1->{message_type} (expected OFFER)";
+    my $options1;
+    for my $try (0..$retries) {
+        # DISCOVER
+        $mac = packet_send(DISCOVER,
+                           $fou, $interface, $server_addr, $xid, $gateway_ip, $mac,
+                           $broadcast, $unicast,
+                           defined $hostname ? (hostname => $hostname) : ());
 
-$xid = int(($xid+1) % 2**32);
+        # OFFER
+        last if
+            $options1 = packet_receive($recv, $timeout, $xid, $expect_addr, $mac);
+        print "DHCPOFFER receive timed out\n" if $verbose >= 2;
+    }
+    if (!$options1) {
+        print $nagios ? "CRITICAL - " : "", "Max DHCPDISCOVER retries reached\n";
+        exit 2;
+    }
+    $options1->{message_type} == OFFER ||
+        die "Unexpected reply type $options1->{message_type} (expected OFFER)";
 
-my $options2;
-for my $try (0..$retries) {
-    # REQUEST
-    packet_send(REQUEST,
-                $fou, $interface,
-                $track ? $options1->{server_addr} : $server_addr,
-                $xid, $gateway_ip, $mac,
-                $track ? 0 : $broadcast, $unicast,
-                defined $hostname ? (hostname	=> $hostname) : (),
-                request_ip	=> $options1->{your_ip},
-                server		=> $options1->{server_addr});
+    $xid = int(($xid+1) % 2**32);
 
-    # ACK
-    last if
-        $options2 = packet_receive($recv, $timeout, $xid, $options1->{server}, $mac);
-    print "ACK receive timed out\n" if $verbose;
-}
-if (!$options2) {
-    print "Max retries reached\n" if $verbose;
-    exit 1;
-}
-$options2->{message_type} == ACK ||
-    die "Unexpected reply type $options2->{message_type} (expected ACK)";
-print "$separator\n" if $verbose;
-print "DHCP Server $options2->{server_ip} gave out $options2->{your_ip} to MAC $options2->{hw}\n";
+    my $options2;
+    if ($request) {
+        for my $try (0..$retries) {
+            # REQUEST
+            packet_send(REQUEST,
+                        $fou, $interface,
+                        $track ? $options1->{server_addr} : $server_addr,
+                        $xid, $gateway_ip, $mac,
+                        $track ? 0 : $broadcast, $unicast,
+                        defined $hostname ? (hostname	=> $hostname) : (),
+                        request_ip	=> $options1->{your_ip},
+                        server		=> $options1->{server_addr});
 
-if (!$keep) {
-    # RELEASE
-    packet_send(RELEASE,
-                $fou, $interface,
-                $track ? $options2->{server_addr} : $server_addr,
-                $xid, $gateway_ip, $mac,
-                $track ? 0 : $broadcast, $unicast,
-                defined $hostname ? (hostname	=> $hostname) : (),
-                request_ip	=> $options2->{your_ip},
-                server		=> $options2->{server_addr});
+            # ACK
+            last if
+                $options2 = packet_receive($recv, $timeout, $xid, $options1->{server}, $mac);
+            print "DHCPACK receive timed out\n" if $verbose >= 2;
+        }
+        if (!$options2) {
+            print $nagios ? "CRITICAL - " : "", "Max DHCPREQUEST retries reached\n";
+            exit 2;
+        }
+        if ($options2->{message_type} != ACK) {
+            my $message_type = message_type($options2->{message_type});
+            my $result = "Unexpected reply type DHCP$message_type (expected DHCPACK)";
+            $result.= ". Reason: $options2->{message}" if
+                $options2->{message} ne "";
+            $result .= "\n";
+            if ($nagios) {
+                print "CRITICAL - $result";
+                exit 2;
+            }
+            die $result;
+        }
+        print "$separator\n" if $verbose >= 2;
+        $result = "DHCP Server $options2->{server_ip} gave out $options2->{your_ip} to MAC $options2->{hw}\n";
+    } else {
+        $options2 = $options1;
+        $result = "DHCP Server $options2->{server_ip} offered $options2->{your_ip} to MAC $options2->{hw}\n";
+    }
+    print $result if !$nagios || $verbose >= 2;
+
+    if (!$keep) {
+        # RELEASE
+        packet_send(RELEASE,
+                    $fou, $interface,
+                    $track ? $options2->{server_addr} : $server_addr,
+                    $xid, $gateway_ip, $mac,
+                    $track ? 0 : $broadcast, $unicast,
+                    defined $hostname ? (hostname	=> $hostname) : (),
+                    request_ip	=> $options2->{your_ip},
+                    server => $options2->{server_addr});
+    }
+};
+if ($@) {
+    die $@ if !$nagios;
+    print "UNKNOWN - $@";
+    exit 3;
 }
+print "OK - $result" if $nagios;
+
 __END__
 
 =head1 NAME
@@ -253,11 +284,12 @@ dhcp_test - Do a test DHCP exchange
 
 =head1 SYNOPSIS
 
- dcp_test [-v|--verbose] [-k|--keep] [-m|-mac [<string>]] [--xid <INT>]
-          [-H|--hostname [<string>]] [-e|--expect <IP>] [--fou <ADDRESS>]
-          [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
-          [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
-          [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
+ dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep]
+           [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
+           [-e|--expect <IP>] [--fou <ADDRESS>]
+           [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
+           [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
+           [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
  dhcp_test [--version] [-U | --unsafe] [-h | --help]
 
 =head1 DESCRIPTION
@@ -274,7 +306,19 @@ Valid options are:
 
 =item X<verbose>-v, --verbose
 
-Print details about the DHCP exchange
+Print details about the DHCP exchange. Can be given more than once to increase
+verbosity.
+
+=item X<nagios>-N, --nagios
+
+Behave like a Nagios monitoring plugin.
+
+=item X<request>-R, --request
+
+Do a DHCPREQUEST after DHCPDISCOVER/DHCPOFFER. This flag is on by default, so
+the expected use is C<--no-request> which will cause the program to not do
+the DHCPREQUEST/DHCPACK step. Even then it will still do the DHCPRELEASE unless
+the L<--keep|/keep> option is given.
 
 =item X<keep>-k, --keep
 
@@ -548,7 +592,7 @@ we can set up a FOU tunnel that catches the response:
    ip rule add fwmark 17 lookup 101
 
    # Route everything in routing plane 101 to the FOU tunnel:
-   # ip route add default via 10.253.4.1 table 101
+   ip route add default via 10.253.4.1 table 101
 
 =head1 BUGS
 

@@ -5,11 +5,12 @@ dhcp\_test - Do a test DHCP exchange
 # SYNOPSIS
 
 ```
-dcp_test [-v|--verbose] [-k|--keep] [-m|-mac [<string>]] [--xid <INT>]
-         [-H|--hostname [<string>]] [-e|--expect <IP>] [--fou <ADDRESS>]
-         [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
-         [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
-         [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
+dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep]
+          [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
+          [-e|--expect <IP>] [--fou <ADDRESS>]
+          [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
+          [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
+          [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
 dhcp_test [--version] [-U | --unsafe] [-h | --help]
 ```
 
@@ -25,7 +26,19 @@ Valid options are:
 
 - -v, --verbose
 
-    Print details about the DHCP exchange
+    Print details about the DHCP exchange. Can be given more than once to increase
+    verbosity.
+
+- -N, --nagios
+
+    Behave like a Nagios monitoring plugin.
+
+- -R, --request
+
+    Do a DHCPREQUEST after DHCPDISCOVER/DHCPOFFER. This flag is on by default, so
+    the expected use is `--no-request` which will cause the program to not do
+    the DHCPREQUEST/DHCPACK step. Even then it will still do the DHCPRELEASE unless
+    the [--keep](#keep) option is given.
 
 - -k, --keep
 
@@ -318,7 +331,7 @@ iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF
 ip rule add fwmark 17 lookup 101
 
 # Route everything in routing plane 101 to the FOU tunnel:
-# ip route add default via 10.253.4.1 table 101
+ip route add default via 10.253.4.1 table 101
 ```
 
 # BUGS

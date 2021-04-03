@@ -345,7 +345,7 @@ sub fou {
     chop $txt;
     my $buffer = $header . $udp_header . pack("n", 0xffff - $sum || 0xffff) . $txt;
 
-    if (0) {
+    if ($verbose >= 3) {
         my $buf = $buffer;
         my ($ihl, $ecn, $length, $packet_id, $fragment, $ttl, $proto, $chksum, $src, $dst) = unpack("CCnnnCCna4a4", $buf);
         my $version = $ihl >> 4;
@@ -389,7 +389,7 @@ sub fou {
 
         my $dscp = $ecn >> 3;
         $ecn &= 0x7;
-        print "HEADER: DSCP=$dscp, ECN=$ecn, ID=$packet_id, FLAGS=$flags, FRAGMENT=$fragment, TTL=$ttl, CHKSUM=$chksum, SUM=$sum, SRC=$src, DST=$dst\n" if $verbose;
+        print "HEADER: DSCP=$dscp, ECN=$ecn, ID=$packet_id, FLAGS=$flags, FRAGMENT=$fragment, TTL=$ttl, CHKSUM=$chksum, SUM=$sum, SRC=$src, DST=$dst\n";
 
         # Must have space for UDP header
         die "Bad UDP length $length" if $length < $UDP_HEADER;
@@ -409,8 +409,8 @@ sub fou {
             $sum == 0xffff || die "Bad UDP chksum $sum";
         }
 
-        print "SPRT=$sprt, DPRT=$dprt, LEN=$udp_len, CHK=$udp_chksum\n" if $verbose;
-        print "Encapsulated FOU packet from $src:$sprt to $dst:$dprt\n" if $verbose;
+        print("SPRT=$sprt, DPRT=$dprt, LEN=$udp_len, CHK=$udp_chksum\n" .
+              "Encapsulated FOU packet from $src:$sprt to $dst:$dprt\n");
     }
 
     my $rc = syswrite($sender, $buffer) //
@@ -424,7 +424,7 @@ sub packet_send {
         $broadcast, $unicast, %options) = @_;
 
     my $ciaddr = INADDR_ANY;
-    if ($type == RELEASE) {
+    if ($type != DISCOVER) {
         my $client_ip = delete $options{request_ip} //
             croak "Missing mandatory option 'request_ip'";
         $ciaddr = inet_aton($client_ip) // croak "Invalid 'request_ip' value";
@@ -493,7 +493,7 @@ sub packet_send {
             die "Sent truncated DHCP message\n";
     }
     printf("%s\nDHCP%s sent to %s\n",
-           $separator, message_type($type), inet_ntoa($target)) if $verbose;
+           $separator, message_type($type), inet_ntoa($target)) if $verbose >= 2;
     return $mac;
 }
 
@@ -546,7 +546,7 @@ sub options_parse {
             } else {
                 die "Assertion: Unimplemented option type $option_type->[0]";
             }
-            if ($verbose && $disply_name ne "") {
+            if ($verbose >= 2 && $disply_name ne "") {
                 if (ref $options->{$name} eq "ARRAY") {
                     print "$disply_name: @{$options->{$name}}\n";
                 } else {
@@ -555,7 +555,7 @@ sub options_parse {
             }
         } else {
             $value = unpack("H*", $value);
-            print "Option $tag: $value\n" if $verbose;
+            print "Option $tag: $value\n" if $verbose >= 2;
         }
     }
 }
@@ -584,12 +584,14 @@ sub packet_receive {
         my ($server_port, $server_addr) = unpack_sockaddr_in($server) or
             die "Could not decode UDP sender address";
         my $server_ip = inet_ntoa($server_addr);
-        # print "PACKET from $server_ip:$server_port\n" if $verbose;
+        print "Received packet from $server_ip:$server_port\n" if $verbose >= 3;
         if (ord $buffer == ($IP_VERSION << 4 | $IHL)) {
             # May be FOU encapsulated packet
             next if length $buffer < 20;
             my ($ihl, $ecn, $length, $id, $fragment, $ttl, $proto, $chksum, $src, $dst) = unpack("CCnnnCCna4a4", $buffer);
-            # print STDERR "TEMP: IHL=$ihl, ECN=$ecn, LEN=$length, ID=$id, FRAGMENT=$fragment, TTL=$ttl, PROTO=$proto, CHK=$chksum, SRC=$src, DST=$dst\n";
+            printf("TEMP: IHL=%d, ECN=%d, LEN=%d, ID=%d, FRAGMENT=%d, TTL=%d, PROTO=%d, CHK=%04x, SRC=%s, DST=%s\n",
+                   $ihl, $ecn, $length, $id, $fragment, $ttl, $proto, $chksum,
+                   inet_ntoa($src), inet_ntoa($dst)) if $verbose >= 3;
 
             # Skip spammy multicast stuff
             next if MULTICAST_BEGIN le $dst && $dst lt MULTICAST_END;
@@ -628,14 +630,14 @@ sub packet_receive {
             }
             $sum == 0xffff || next;
 
-            # print "Sender $server_ip:$server_port\n";
+            print "Sender $server_ip:$server_port\n" if $verbose >= 3;
 
             $src = inet_ntoa($src);
             $dst = inet_ntoa($dst);
 
             my $dscp = $ecn >> 3;
             $ecn &= 0x7;
-            # print "HEADER: DSCP=$dscp, ECN=$ecn, ID=$id, FLAGS=$flags, FRAGMENT=$fragment, TTL=$ttl, CHKSUM=$chksum, SRC=$src, DST=$dst\n" if $verbose;
+            print "HEADER: DSCP=$dscp, ECN=$ecn, ID=$id, FLAGS=$flags, FRAGMENT=$fragment, TTL=$ttl, CHKSUM=$chksum, SRC=$src, DST=$dst\n" if $verbose >= 3;
 
             # Must have space for UDP header
             next if $length < $UDP_HEADER;
@@ -658,7 +660,7 @@ sub packet_receive {
             $server_ip = $src;
             $server_addr = inet_aton($src);
             $server_port = $sprt;
-            print "Decapsulated FOU packet from $src:$sprt to $dst:$dprt, LEN=$udp_len\n" if $verbose;
+            print "Decapsulated FOU packet from $src:$sprt to $dst:$dprt, LEN=$udp_len\n" if $verbose >= 2;
         }
 
         $server_port == BOOTPS || next;
@@ -678,7 +680,7 @@ sub packet_receive {
         my $hw = mac_string($hw_addr);
         printf("%s\nReply (length %d) from %s:%d for MAC %s\n",
                $separator, length $buffer, $server_ip, $server_port, $hw) if
-                   $verbose;
+                   $verbose >= 2;
         $hw_type == HW_ETHERNET || next;
         $reply_xid == $xid || next;
         !$expect_addr || $server_addr eq $expect_addr || next;
@@ -700,7 +702,7 @@ sub packet_receive {
             hw		=> $hw,
         );
         defined $options || die "Truncated DHCP reply";
-        print <<"EOF" if $verbose
+        print <<"EOF" if $verbose >= 2
 op=$op, hw_type=$hw_type, hw_len=$hw_len, hops=$hops
 xid=$option{xid_ip} secs=$secs, flags=$flags
 client IP: $option{client_ip}
@@ -729,22 +731,27 @@ EOF
         if ($server_name) {
             $option{server_name} = unpack("Z*", $server_name);
             print "Server Name: $option{server_name}\n" if
-                $verbose && $option{server_name} ne "";
+                $verbose >= 2 && $option{server_name} ne "";
         }
         if ($boot_file) {
             $option{boot_file} = unpack("Z*", $boot_file);
             print "Boot File: $option{boot_file}\n" if
-                $verbose && $option{boot_file} ne "";
+                $verbose >= 2 && $option{boot_file} ne "";
         }
-        exists $option{server} || die "Missing server identifier in DHCP reply";
-        $option{server} eq $server_addr ||
-            die sprintf("Inconsistent server: Received packet from %s but server identifier in packet is %s", $server_ip, inet_ntoa($option{server}));
+        exists $option{message_type} || die "No reply message type";
+        if (exists $option{server}) {
+            $option{server} eq $server_addr ||
+                die sprintf("Inconsistent server: Received packet from %s but server identifier in packet is %s", $server_ip, inet_ntoa($option{server}));
+        } elsif ($option{message_type} == NAK) {
+            $option{server} = $server_addr;
+        } else {
+            die "Missing server identifier in DHCP reply";
+        }
 
         # On my net the router can send a NAK even though the router does
         # not mot match the server identifier. So we should do a perl "next" if
         # server identifier does not match request
 
-        exists $option{message_type} || die "No reply message type";
         return \%option;
     } continue {
         $now = clock_gettime(CLOCK_MONOTONIC);
