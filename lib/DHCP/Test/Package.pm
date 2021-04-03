@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "013";
-$release_time = 1617273456;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "014";
+$release_time = 1617457500;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -21,6 +21,9 @@ $release_time = 1617273456;	## no critic (UselessNoCritic MagicNumbers)
     '1.000' => '1.000'
   },
   'README' => {
+    '1.000' => '1.000'
+  },
+  'README.md' => {
     '1.000' => '1.000'
   },
   'bin/dhcp_test' => {

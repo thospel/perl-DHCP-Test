@@ -133,7 +133,7 @@ use Exporter::Tidy
            BULKLEASEQUERY LEASEQUERYDONE ACTIVELEASEQUERY LEASEQUERYSTATUS TLS)],
     other => [qw($verbose $separator
                  parse_address packet_send options_parse packet_receive
-                 message_type)];
+                 message_type mac_string)];
 
 my $request_list =
     pack("W*",
@@ -217,6 +217,12 @@ my $UDP_HEADER = 8;
 my $DF = 2;
 my $TTL = 64;
 my $TTL_LOW = 2;
+
+sub mac_string {
+    my $mac = uc unpack("H*", shift);
+    $mac =~ s/(..)\B/$1:/g;
+    return $mac;
+}
 
 sub parse_address {
     my ($str, $context, $default_host, $default_port, $prefer_host) = @_;
@@ -669,9 +675,10 @@ sub packet_receive {
         $cookie && $cookie == COOKIE || next;
         $hw_addr = substr($hw_addr, 0, $hw_len);
         $hw_addr eq $mac || next;
-        printf "%s\nReply (length %d) from %s:%d for %s\n",
-            $separator, length $buffer, $server_ip, $server_port,
-            unpack("H*", $hw_addr) if $verbose;
+        my $hw = mac_string($hw_addr);
+        printf("%s\nReply (length %d) from %s:%d for MAC %s\n",
+               $separator, length $buffer, $server_ip, $server_port, $hw) if
+                   $verbose;
         $hw_type == HW_ETHERNET || next;
         $reply_xid == $xid || next;
         !$expect_addr || $server_addr eq $expect_addr || next;
@@ -690,10 +697,9 @@ sub packet_receive {
             gateway_addr=> $gateway_addr,
             gateway_ip	=> inet_ntoa($gateway_addr),
             hw_addr	=> $hw_addr,
+            hw		=> $hw,
         );
         defined $options || die "Truncated DHCP reply";
-        my $hw = uc unpack("H*", $option{hw_addr});
-        $hw =~ s/(..)\B/$1:/g;
         print <<"EOF" if $verbose
 op=$op, hw_type=$hw_type, hw_len=$hw_len, hops=$hops
 xid=$option{xid_ip} secs=$secs, flags=$flags
@@ -701,7 +707,6 @@ client IP: $option{client_ip}
 Your   IP: $option{your_ip}
 Server IP: $option{server_ip}
 Gate   IP: $option{gateway_ip}
-MAC: $hw
 EOF
             ;
         options_parse(\%option, $options);

@@ -28,7 +28,7 @@ EOT
 if !$opt_y;
     push @programs_to_install, "bin/dhcp_test" if
         $opt_y ||
-        prompt("Install dhcp_test, Test dhcp server ?", "y") =~ /^y/i;
+        prompt("Install dhcp_test, a utility to test DHCP servers ?", "y") =~ /^y/i;
 }
 
 my $option_file = "$FindBin::Bin/t/options.$^O";
@@ -57,13 +57,17 @@ WriteMakefile
          ExtUtils::MakeMaker->VERSION(6.55_01);
          1;
      } ? (BUILD_REQUIRES	=> {
+         # To generate README
+         "Pod::Markdown::Github"	=> "0.02",
          # Only for the tests
          "Test::More"	=> "0.01",
      }) : (),
      PREREQ_PM		=> {
          "Exporter::Tidy"		=> "0.06",
          # After OpenBSD segfault patches (2014 should be old enough)
-         "IO::Interface::Simple"	=> "1.08",
+         # We actually only directly use subpackage IO::Interface::Simple
+         # but internally that uses IO::Interface anyways
+         "IO::Interface"	=> "1.08",
      },
      ABSTRACT		=> 'Ton Hospel <DHCP-Test@ton.iguana.be>',
      AUTHOR		=> 'Ton Hospel <ton@>',
@@ -73,7 +77,7 @@ WriteMakefile
          PM_FILTER	=> '$(PERL) -p -e1',
      ) : (),
      clean		=> {
-         FILES => '$(DISTNAME).ppd ppm cover_db nytprof nytprof.out* t/options t/options.* md5-versions.old',
+         FILES => '$(DISTNAME).ppd ppm cover_db nytprof nytprof.out* t/options t/options.* md5-versions.old *.bak',
      },
      #Value must be from legacy list of licenses here
      #http://search.cpan.org/perldoc?Module%3A%3ABuild%3A%3AAPI
@@ -161,5 +165,13 @@ EOT
     $postamble{ppm4} = <<'EOT';
 ppm4: $(DISTNAME).ppd
 	$(PERL) bin/makeppd.pl --min_version=1.016 "--zip=$(ZIP)" "--tar=$(TAR)" "--compress=$(COMPRESS)" --ppm_version=4 --leave=ppm4 $(DISTNAME).ppd $(VERSION)
+EOT
+
+    $postamble{README} = <<'EOT';
+README.md: bin/dhcp_test
+	pod2readme -f github bin/dhcp_test README.md
+
+dist: README.md
+
 EOT
 }

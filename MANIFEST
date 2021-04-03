@@ -2,6 +2,7 @@ Changes
 MANIFEST
 Makefile.PL
 README
+README.md
 bin/dhcp_test
 lib/DHCP/Test.pm
 lib/DHCP/Test/Package.pm

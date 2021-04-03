@@ -17,9 +17,9 @@ ip fou add port 1237 ipproto 4 local 127.0.0.1
 sysctl -w net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.conf.fou1.rp_filter=0
 
-# Match DHCP replies about MAC address 00:00:6C:XX:XX:XX
+# Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX
 # Leave operational DHCP replies alone
-iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@35&0xffffff=0x6c" -j MARK --set-mark 17
+iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
 
 # Make marked packets use routing plane 101
 ip rule add fwmark 17 lookup 101
@@ -33,7 +33,7 @@ ip rule add fwmark 17 lookup 101
 # connection it means that effectively the the MAC match gets ignored
 
 # Now this works (on 10.253.0.8):
-dhcp_test -v -g 10.254.0.14  -s 0.0.0.1 -l 1236 -r 0 -e 10.253.0.8 -m 00:00:6C --fou 1237
+dhcp_test -v -g 10.254.0.14  -s 0.0.0.1 -l 1236 -r 0 -e 10.253.0.8 -m BA:D1 --fou 1237
 # Notice that -s <local address> like 0.0.0.0, 255.255.255.255, 10.235.0.8 etc
 # all fail. The reason is unclear. The DHCPDISCOVER packet is generated (you
 # can tcpdump it on interface fou1, and strace shows that the DHCP server
@@ -46,7 +46,7 @@ dhcp_test -v -g 10.254.0.14  -s 0.0.0.1 -l 1236 -r 0 -e 10.253.0.8 -m 00:00:6C -
 # destination address. I always get a mask of /32 however I add the filter
 # Either I do something wrong or its a bug or what I want is impossible:
 #
-# ptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@35&0xffffff=0x6c" -j MARK --set-mark 18
+# iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 18
 # tc qdisc del add eno1 root handle 1 htb
 # tc filter add dev eno1 parent 1: protocol ip prio 8 handle 18 fw action nat ingress any 10.253.0.14/16
 # tc filter show dev eno1
@@ -96,8 +96,8 @@ use DHCP::Test::Package;
 my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
 my $hostname_local = hostname();
 $hostname_local =~ s/\..*//sg;
-my $timeout = 1.2;
-my $retries = 3;
+my $timeout = 1.5;
+my $retries = 2;
 
 die "Could not parse your command line. Try $0 -h\n" unless
     GetOptions("v|verbose!"	=> \$verbose,
@@ -145,18 +145,23 @@ my $expect_addr = defined $expect_ip ?
     undef;
 $xid = unpack("N", inet_aton($xid) // die "Could not resolve xid '$xid'");
 if (defined $mac) {
-    $mac =~ /^[0-9A-F:. ]*\z/i || die "Invalid MAC '$mac'\n";
-    $mac =~ s{([0-9A-F]+)}{length($1) % 2 ? "0$1" : $1}eig;
-    $mac =~ tr/:. //d;
-    $mac = pack("H*", $mac);
-    if (length $mac != 6) {
-        length $mac < 6 || die "Invalid MAC length";
-        if (length $mac == 5) {
-            $mac .= pack("W", $$ & 0xff);
-        } else {
-            $mac = substr($mac . pack("nN", $$ & 0xffff, rand 2**32), 0, 6);
-        }
+    $mac =~ /^[0-9A-FX:. ]*\z/i || die "Invalid MAC '$mac'\n";
+    $mac =~ s{([0-9A-FX]+)}{length($1) % 2 ? "0$1" : $1}eig;
+    $mac =~ tr/a-fx:. /A-FX/d;
+print "MAC=$mac\n";
+    length $mac == 12 || die "Invalid MAC length";
+    if (my $x = $mac =~ tr/X//) {
+        my $now = time();
+        my $replace = substr(sprintf("%02X%04X%04X%02X",
+                                     rand(2**8),
+                                     $now & 0xffff,
+                                     rand(2**16),
+                                     $$ & 0xff), -$x);
+        # print "Replace=$replace\n";
+        $mac =~ s{X}{die "Assertion: out of replace bytes" if $replace eq "";
+                     substr($replace, 0, 1, "")}eg;
     }
+    $mac = pack("H*", $mac);
 }
 $broadcast = 1 if !defined $broadcast && !$server_ip;
 my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
@@ -227,7 +232,7 @@ if (!$options2) {
 $options2->{message_type} == ACK ||
     die "Unexpected reply type $options2->{message_type} (expected ACK)";
 print "$separator\n" if $verbose;
-print "DHCP Server $options2->{server_ip} gave out $options2->{your_ip}\n";
+print "DHCP Server $options2->{server_ip} gave out $options2->{your_ip} to MAC $options2->{hw}\n";
 
 if (!$keep) {
     # RELEASE
@@ -288,12 +293,35 @@ is not given the MAC address of the sending interface will be used.
 
 The program currently only supports ethernet.
 
-It is valid to pass a too short MAC string. In that case the mac will get padded
-with somewhat random bytes. For example using
+The I<STRING> is a case insensitive hexadecimal string and may use colons,
+periods or spaces as separators. Separated groups are left padded with a C<0>
+if their length is odd. So
 
-   --mac 00:00:6C
+   --mac "1 Ab::6. 3dE 12"
 
-will generate a MAC address not used by any real device
+will be interpreted the same as C<01AB0603XE12> or C<01:AB:06:03:XE:12>
+
+As seen in this example you can also set digits in I<STRING> to the placeholder
+C<X>. These nibbles will be replaced by somewhat random values. This allows you
+to generate probably unique MACs. For example
+
+   --mac BA:D1:XX:XX:XX:XX
+
+might generate a MAC address like C<BA:D1:28:F8:6C:1B> which should hopefully be
+unique among recent C<dhcp_test> requests and should not be in use by any real
+device because MAC addresses with the second least significant bit of the most
+significant octet set are locally administered for unicast:
+
+  x2:xx:xx:xx:xx:xx
+  x6:xx:xx:xx:xx:xx
+  xA:xx:xx:xx:xx:xx
+  xE:xx:xx:xx:xx:xx
+
+Something else on your net may also use locally administered MAC addresses
+(e.g. some embedded devices), so make sure to pick a prefix that doesn't clash.
+
+Also take care when combining MAC placeholders with the L<--keep|/keep> option
+because you may exhaust the DHCP server IP addresses pool.
 
 =item X<xis>--xid I<INT>
 
@@ -436,12 +464,12 @@ the packet is first decapsulated before further processing.
 =item X<timeout>-r, --timeout I<FLOAT>
 
 After sending a DHCP request the program will wait for I<FLOAT> seconds for
-a resonse. Defaults to I<1>.
+a resonse. Defaults to I<1.5>.
 
 =item X<retries>-r, --retries I<INT>
 
 If the DHCP response times out the program will retry I<INT> more times.
-Defaults to I<3>.
+Defaults to I<2> (giving a total of 3 attempts)
 
 =item X<help>-h, --help
 
@@ -489,13 +517,13 @@ Do normal DHCP broadcasts, but only accept offers from a specific DHCP server:
 A very complex example:
 
 Send a request on interface C<eth0> (-i) to C<0.0.0.1> (-s) for a host with
-randomly generated MAC address C<00:00:6C:XX:XX:XX> (-m) and proposed hostname
+randomly generated MAC address C<BA:D1:XX:XX:XX:XX> (-m) and proposed hostname
 C<pluto> (-H) as a DHCP relay that expects an answer to 10.254.0.14 (-g). Only
 accept answers from C<10.253.0.8> (-e). Once the DHCP server gives us an IP
 address we hold one to it (-k). Send using FOU over port 1237 and listen for
 (FOU) answers on port C<1236> (-l)
 
-   dhcp_test -s 0.0.0.1 -e 10.253.0.8 -m 00:00:6C -H pluto -k -g 10.254.0.14 -i eth0 -l 1236 --fou 1237
+   dhcp_test -s 0.0.0.1 -e 10.253.0.8 -m BA:D1:XX:XX:XX:XX -H pluto -k -g 10.254.0.14 -i eth0 -l 1236 --fou 1237
 
 We assume here we are running on C<10.254.0.8> which is also the host with a
 DHCP server (which snoops the otherwise meaningless packets to C<0.0.0.1>). So
@@ -512,9 +540,9 @@ we can set up a FOU tunnel that catches the response:
    sysctl -w net.ipv4.conf.all.rp_filter=0
    sysctl -w net.ipv4.conf.fou1.rp_filter=0
 
-   # Match DHCP replies about MAC address 00:00:6C:XX:XX:XX
+   # Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX
    # Leave operational DHCP replies alone
-   iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@35&0xffffff=0x6c" -j MARK --set-mark 17
+   iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
 
    # Make marked packets use routing plane 101
    ip rule add fwmark 17 lookup 101
