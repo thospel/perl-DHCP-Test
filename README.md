@@ -7,7 +7,7 @@ dhcp\_test - Do a test DHCP exchange
 ```
 dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep]
           [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
-          [-e|--expect <IP>] [--fou <ADDRESS>]
+          [-I|--ip <ADDRESS>] [-e|--expect <IP>] [--fou <ADDRESS>]
           [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
           [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
           [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
@@ -49,6 +49,11 @@ Valid options are:
 
     Propose this hostname to the DHCP server. If this option is given but the _STRING_ value is absent or empty it will use the name of the host the program runs
      on.
+
+- -I, --ip <ADDRESS>
+
+    Suggest this preferred IP address to the DHCP server. The DHCP server is free to
+    ignore this and offer some other IP address.
 
 - -m, --mac _STRING_
 

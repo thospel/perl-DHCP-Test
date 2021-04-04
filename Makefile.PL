@@ -172,6 +172,12 @@ README.md: bin/dhcp_test
 	pod2readme -f github bin/dhcp_test README.md
 
 dist: README.md
+EOT
+
+    $postamble{commit} = <<'EOT';
+commit: all README.md
+	release_pm
+	git commit -a
 
 EOT
 }

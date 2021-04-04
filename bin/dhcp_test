@@ -86,9 +86,10 @@ use Sys::Hostname qw(hostname);
 
 use DHCP::Test qw($verbose $separator
                   SO_BINDTODEVICE PROTO_UDP BOOTPC BOOTPS
-                  DISCOVER OFFER REQUEST ACK RELEASE
+                  DISCOVER OFFER REQUEST ACK RELEASE INFORM
                   OPTION_HOSTNAME OPTION_REQUEST_IP OPTION_SERVER
-                  parse_address packet_send packet_receive message_type);
+                  parse_address packet_send packet_receive message_type
+                  string_from_value);
 use DHCP::Test::Package;
 
 $| = 1;
@@ -110,6 +111,7 @@ eval {
                    "r|retries=o"	=> \$retries,
                    "t|timeout=f"	=> \$timeout,
                    "i|interface=s"	=> \my $interface,
+                   "I|ip=s"		=> \my $request_ip,
                    "m|mac:s"		=> \my $mac,
                    "H|hostname:s"	=> \my $hostname,
                    "l|listen=s"		=> \my $listen,
@@ -150,8 +152,12 @@ EOF
     $request //= -1;
     $hostname = $hostname_local if defined $hostname && $hostname eq "";
     my $expect_addr = defined $expect_ip ?
-        inet_aton($expect_ip) || die("Could not resolve expect IP '$expect_ip'") :
+        inet_aton($expect_ip) ||
+        die("Could not resolve expect IP '$expect_ip'\n") :
         undef;
+    $request_ip = inet_ntoa(
+        inet_aton($request_ip) ||
+        die("Could not resolve request IP '$request_ip'\n"));
     $xid = unpack("N", inet_aton($xid) // die "Could not resolve xid '$xid'");
     if (defined $mac) {
         $mac =~ /^[0-9A-FX:. ]*\z/i || die "Invalid MAC '$mac'\n";
@@ -196,10 +202,13 @@ EOF
     my $options1;
     for my $try (0..$retries) {
         # DISCOVER
-        $mac = packet_send(DISCOVER,
-                           $fou, $interface, $server_addr, $xid, $gateway_ip, $mac,
-                           $broadcast, $unicast,
-                           defined $hostname ? (hostname => $hostname) : ());
+        $mac = packet_send(
+            DISCOVER,
+            $fou, $interface, $server_addr, $xid, $gateway_ip, $mac,
+            $broadcast, $unicast,
+            defined $hostname ? (hostname => $hostname) : (),
+            $request_ip ? (request_ip => $request_ip) : (),
+        );
 
         # OFFER
         last if
@@ -240,7 +249,7 @@ EOF
         if ($options2->{message_type} != ACK) {
             my $message_type = message_type($options2->{message_type});
             my $result = "Unexpected reply type DHCP$message_type (expected DHCPACK)";
-            $result.= ". Reason: $options2->{message}" if
+            $result.= ". Reason: " . string_from_value($options2->{message}) if
                 $options2->{message} ne "";
             $result .= "\n";
             if ($nagios) {
@@ -266,7 +275,8 @@ EOF
                     $track ? 0 : $broadcast, $unicast,
                     defined $hostname ? (hostname	=> $hostname) : (),
                     request_ip	=> $options2->{your_ip},
-                    server => $options2->{server_addr});
+                    server => $options2->{server_addr},
+                    message => "dhcp_test is done testing");
     }
 };
 if ($@) {
@@ -286,7 +296,7 @@ dhcp_test - Do a test DHCP exchange
 
  dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep]
            [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
-           [-e|--expect <IP>] [--fou <ADDRESS>]
+           [-I|--ip <ADDRESS>] [-e|--expect <IP>] [--fou <ADDRESS>]
            [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
            [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
            [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
@@ -329,6 +339,11 @@ Do not release the IP address at the end of the exchange
 
 Propose this hostname to the DHCP server. If this option is given but the I<STRING> value is absent or empty it will use the name of the host the program runs
  on.
+
+=item X<ip>-I, --ip <ADDRESS>
+
+Suggest this preferred IP address to the DHCP server. The DHCP server is free to
+ignore this and offer some other IP address.
 
 =item X<mac>-m, --mac I<STRING>
 

@@ -10,6 +10,7 @@ use Socket qw(INADDR_ANY PF_INET SOCK_DGRAM SOL_SOCKET SO_BROADCAST
 use IO::Interface::Simple;
 use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC );
 use Errno qw(EINTR);
+use Data::Dumper;
 
 use constant {
     # The linux value is 25. Can/will be different on a different OS
@@ -133,7 +134,7 @@ use Exporter::Tidy
            BULKLEASEQUERY LEASEQUERYDONE ACTIVELEASEQUERY LEASEQUERYSTATUS TLS)],
     other => [qw($verbose $separator
                  parse_address packet_send options_parse packet_receive
-                 message_type mac_string)];
+                 message_type mac_string string_from_value)];
 
 my $request_list =
     pack("W*",
@@ -217,6 +218,18 @@ my $UDP_HEADER = 8;
 my $DF = 2;
 my $TTL = 64;
 my $TTL_LOW = 2;
+
+sub string_from_value {
+    local $Data::Dumper::Indent	  = 0;
+    local $Data::Dumper::Sortkeys = 1;
+    local $Data::Dumper::Useqq	  = 1;
+    local $Data::Dumper::Trailingcomma = 0;
+    # local $Data::Dumper::Varname  = "VAR";
+    local $Data::Dumper::Terse = 1;
+    local $Data::Dumper::Quotekeys = 0;
+    local $Data::Dumper::Sparseseen = 1;
+    return Dumper(shift);
+}
 
 sub mac_string {
     my $mac = uc unpack("H*", shift);
@@ -423,12 +436,12 @@ sub packet_send {
     my ($type, $fou, $interface, $target, $xid, $gateway_ip, $mac,
         $broadcast, $unicast, %options) = @_;
 
-    my $ciaddr = INADDR_ANY;
-    if ($type != DISCOVER) {
-        my $client_ip = delete $options{request_ip} //
-            croak "Missing mandatory option 'request_ip'";
-        $ciaddr = inet_aton($client_ip) // croak "Invalid 'request_ip' value";
-    }
+    my $ciaddr = exists $options{request_ip} ?
+        inet_aton($options{request_ip}) || croak "Invalid 'request_ip' value" :
+        INADDR_ANY;
+    croak "Missing mandatory option 'request_ip'" if
+        $ciaddr eq INADDR_ANY &&
+        ($type == INFORM || $type == RELEASE || $type == DECLINE);
     socket(my $sender, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
         die "Could not create socket: $^E";
     !$broadcast || setsockopt($sender, SOL_SOCKET, SO_BROADCAST, 1) ||
@@ -473,17 +486,18 @@ sub packet_send {
 		      $xid,
 		      0,           # secs
                       $unicast ? 0 : FLAG_BROADCAST,	# flags
-                      $ciaddr,
+                      $type == DISCOVER || $type == DECLINE ? INADDR_ANY : $ciaddr,
                       $gateway_ip ? inet_aton($gateway_ip) // die("Could nor resolve gatway IP '$gateway_ip'"): INADDR_ANY,
                       $mac,
                       COOKIE,
                   );
+
+    delete $options{request_ip} if
+        $type == INFORM || $type == RELEASE;
     # Probably should add a check for overlong packets...
     $buffer .= options_build(size_max => 406,
-                                   %options,
-                                   message_type => $type);
-    #my $pad = PACKET_SIZE - length $buffer;
-    #die "Packet too long" if $pad < 0;
+                             %options,
+                             message_type => $type);
     if ($fou) {
         fou($fou, $to, $buffer);
     } else {
@@ -547,15 +561,13 @@ sub options_parse {
                 die "Assertion: Unimplemented option type $option_type->[0]";
             }
             if ($verbose >= 2 && $disply_name ne "") {
-                if (ref $options->{$name} eq "ARRAY") {
-                    print "$disply_name: @{$options->{$name}}\n";
-                } else {
-                    print "$disply_name: $options->{$name}\n";
-                }
+                printf("%s: %s\n", $disply_name,
+                       ref $options->{$name} eq "ARRAY" ?
+                       join(", ", map string_from_value($_), @{$options->{$name}}) :
+                       string_from_value($options->{$name}));
             }
         } else {
-            $value = unpack("H*", $value);
-            print "Option $tag: $value\n" if $verbose >= 2;
+            printf "Option %s: %s\n", $tag, string_from_value($value) if $verbose >= 2;
         }
     }
 }
@@ -730,12 +742,13 @@ EOF
         }
         if ($server_name) {
             $option{server_name} = unpack("Z*", $server_name);
-            print "Server Name: $option{server_name}\n" if
-                $verbose >= 2 && $option{server_name} ne "";
+            printf("Server Name: %s\n",
+                   string_from_value($option{server_name})) if
+                       $verbose >= 2 && $option{server_name} ne "";
         }
         if ($boot_file) {
             $option{boot_file} = unpack("Z*", $boot_file);
-            print "Boot File: $option{boot_file}\n" if
+            printf("Boot File: %s\n", string_from_value($option{boot_file})) if
                 $verbose >= 2 && $option{boot_file} ne "";
         }
         exists $option{message_type} || die "No reply message type";
