@@ -266,8 +266,13 @@ sub message_type {
 sub options_build {
     my (%options) = @_;
 
+    # Make sure message_type exists and becomes the very first option
+    my $type = delete $options{message_type} //
+        die "Assertion: Missing message_type";
+    my @names = ("message_type", sort keys %options);
+    $options{message_type} = $type;
     my $str = "";
-    for my $name (keys %options) {
+    for my $name (@names) {
         eval {
             my $value= $options{$name};
             my $option_type = $option_names{$name} //
@@ -436,12 +441,12 @@ sub packet_send {
     my ($type, $fou, $interface, $target, $xid, $gateway_ip, $mac,
         $broadcast, $unicast, %options) = @_;
 
+    croak "Missing mandatory option 'request_ip'" if
+        !defined $options{request_ip} &&
+        ($type == INFORM || $type == RELEASE || $type == DECLINE);
     my $ciaddr = exists $options{request_ip} ?
         inet_aton($options{request_ip}) || croak "Invalid 'request_ip' value" :
         INADDR_ANY;
-    croak "Missing mandatory option 'request_ip'" if
-        $ciaddr eq INADDR_ANY &&
-        ($type == INFORM || $type == RELEASE || $type == DECLINE);
     socket(my $sender, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
         die "Could not create socket: $^E";
     !$broadcast || setsockopt($sender, SOL_SOCKET, SO_BROADCAST, 1) ||
@@ -486,7 +491,11 @@ sub packet_send {
 		      $xid,
 		      0,           # secs
                       $unicast ? 0 : FLAG_BROADCAST,	# flags
-                      $type == DISCOVER || $type == DECLINE ? INADDR_ANY : $ciaddr,
+                      # No ciaddr for INFORM is against the RFC, but otherwise
+                      # the gateway is ignored and sent to $ciaddr
+                      # (with the ISC DHCP server, other servers may differ)
+                      $type == DISCOVER || $type == DECLINE || $type == INFORM && $gateway_ip ? INADDR_ANY : $ciaddr,
+                      # $type == DISCOVER || $type == DECLINE ? INADDR_ANY : $ciaddr,
                       $gateway_ip ? inet_aton($gateway_ip) // die("Could nor resolve gatway IP '$gateway_ip'"): INADDR_ANY,
                       $mac,
                       COOKIE,
@@ -495,7 +504,7 @@ sub packet_send {
     delete $options{request_ip} if
         $type == INFORM || $type == RELEASE;
     # Probably should add a check for overlong packets...
-    $buffer .= options_build(size_max => 406,
+    $buffer .= options_build(size_max => 0xffff,
                              %options,
                              message_type => $type);
     if ($fou) {
@@ -561,7 +570,8 @@ sub options_parse {
                 die "Assertion: Unimplemented option type $option_type->[0]";
             }
             if ($verbose >= 2 && $disply_name ne "") {
-                printf("%s: %s\n", $disply_name,
+                printf("%s:%s\t%s\n", $disply_name,
+                       length $disply_name <= 6 ? "\t" : "",
                        ref $options->{$name} eq "ARRAY" ?
                        join(", ", map string_from_value($_), @{$options->{$name}}) :
                        string_from_value($options->{$name}));
@@ -715,12 +725,11 @@ sub packet_receive {
         );
         defined $options || die "Truncated DHCP reply";
         print <<"EOF" if $verbose >= 2
-op=$op, hw_type=$hw_type, hw_len=$hw_len, hops=$hops
-xid=$option{xid_ip} secs=$secs, flags=$flags
-client IP: $option{client_ip}
-Your   IP: $option{your_ip}
-Server IP: $option{server_ip}
-Gate   IP: $option{gateway_ip}
+op=$op, hw_type=$hw_type, hw_len=$hw_len, hops=$hops xid=$option{xid_ip} secs=$secs, flags=$flags
+client IP:\t$option{client_ip}
+Your   IP:\t$option{your_ip}
+Server IP:\t$option{server_ip}
+Gate   IP:\t$option{gateway_ip}
 EOF
             ;
         options_parse(\%option, $options);
@@ -742,13 +751,13 @@ EOF
         }
         if ($server_name) {
             $option{server_name} = unpack("Z*", $server_name);
-            printf("Server Name: %s\n",
+            printf("Server Name:\t%s\n",
                    string_from_value($option{server_name})) if
                        $verbose >= 2 && $option{server_name} ne "";
         }
         if ($boot_file) {
             $option{boot_file} = unpack("Z*", $boot_file);
-            printf("Boot File: %s\n", string_from_value($option{boot_file})) if
+            printf("Boot File:\t%s\n", string_from_value($option{boot_file})) if
                 $verbose >= 2 && $option{boot_file} ne "";
         }
         exists $option{message_type} || die "No reply message type";

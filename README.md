@@ -5,7 +5,7 @@ dhcp\_test - Do a test DHCP exchange
 # SYNOPSIS
 
 ```
-dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep]
+dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
           [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
           [-I|--ip <ADDRESS>] [-e|--expect <IP>] [--fou <ADDRESS>]
           [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
@@ -44,6 +44,24 @@ Valid options are:
 
     Do not release the IP address at the end of the exchange
     (don't send the DHCPRELEASE).
+
+- --inform
+
+    Don't do a DISCOVER/OFFER/REQUEST/ACK/RELEASE sequence, but just do
+    INFORM/ACK instead.
+
+    This option is actually not that useful in general because the answer tends to
+    go directly to the IP address the DHCP server selects which quite often isn't
+    the IP address the program is running on, so the program will not see it and
+    time out. The [--gateway](#gateway) option may work but the DHCP server will
+    typically ignore the MAC addres you want to match.
+
+    So it is mostly just usable to query information about the local host. For
+    example like this:
+
+    ```
+    dhcp_test --inform -v
+    ```
 
 - -H, --hostname _STRING_
 
@@ -192,15 +210,20 @@ Valid options are:
 
     The program will behave like a DHCP relay. All requests will use the given _IP_
     as the gateway address. The _IP_ argument is optional. If this option is given
-    without argument or with an empty argument it will use a local IP address instead (the IP address that
-    would be used as source for packets to [sender](#sender)).
+    without argument or with an empty argument it will use a local IP address
+    instead (the IP address that would be used as source for packets to
+    [sender](#sender)).
 
     If this option is used the DHCP server will send its responses back to _IP_.
     So if this is not a local IP the program will normally not see the DHCP response
     so only do that if you have a cunning plan.
 
     Notice that this option is the way you tell a DHCP server to select an address
-    from a different subnet than the one with the DGCP server address.
+    from a different subnet than the one with the DHCP server address.
+
+    Also notice that this option by default will try to listen on port `67`
+    (unless the [--listen](#listen) option is given) which means you typically
+    can't use this on a host that runs a DHCP server or DHCP relay)
 
 - --fou _ADDRESS_
 

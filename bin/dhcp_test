@@ -126,6 +126,7 @@ eval {
                    "e|expect=s"		=> \my $expect_ip,
                    "R|request!"		=> \my $request,
                    "k|keep!"		=> \my $keep,
+                   "inform!"		=> \my $inform,
                    "N|nagios!"		=> \$nagios,
                    "fou=s"		=> \my $fou,
                    "version!"		=> \my $version,
@@ -157,7 +158,8 @@ EOF
         undef;
     $request_ip = inet_ntoa(
         inet_aton($request_ip) ||
-        die("Could not resolve request IP '$request_ip'\n"));
+        die("Could not resolve request IP '$request_ip'\n")) if
+            defined $request_ip;
     $xid = unpack("N", inet_aton($xid) // die "Could not resolve xid '$xid'");
     if (defined $mac) {
         $mac =~ /^[0-9A-FX:. ]*\z/i || die "Invalid MAC '$mac'\n";
@@ -200,43 +202,52 @@ EOF
     $recv->blocking(0);
 
     my $options1;
-    for my $try (0..$retries) {
-        # DISCOVER
-        $mac = packet_send(
-            DISCOVER,
-            $fou, $interface, $server_addr, $xid, $gateway_ip, $mac,
-            $broadcast, $unicast,
-            defined $hostname ? (hostname => $hostname) : (),
-            $request_ip ? (request_ip => $request_ip) : (),
-        );
+    if ($inform) {
+        $options1 = {
+            your_ip	=> $request_ip || "0.0.0.0",
+        };
+        $keep //= 1;
+    } else {
+        for my $try (0..$retries) {
+            # DISCOVER
+            $mac = packet_send(
+                DISCOVER,
+                $fou, $interface, $server_addr, $xid, $gateway_ip, $mac,
+                $broadcast, $unicast,
+                defined $hostname ? (hostname => $hostname) : (),
+                $request_ip ? (request_ip => $request_ip) : (),
+            );
 
-        # OFFER
-        last if
-            $options1 = packet_receive($recv, $timeout, $xid, $expect_addr, $mac);
-        print "DHCPOFFER receive timed out\n" if $verbose >= 2;
-    }
-    if (!$options1) {
-        print $nagios ? "CRITICAL - " : "", "Max DHCPDISCOVER retries reached\n";
-        exit 2;
-    }
-    $options1->{message_type} == OFFER ||
-        die "Unexpected reply type $options1->{message_type} (expected OFFER)";
+            # OFFER
+            last if
+                $options1 = packet_receive($recv, $timeout, $xid, $expect_addr, $mac);
+            print "DHCPOFFER receive timed out\n" if $verbose >= 2;
+        }
+        if (!$options1) {
+            print $nagios ? "CRITICAL - " : "", "Max DHCPDISCOVER retries reached\n";
+            exit 2;
+        }
+        $options1->{message_type} == OFFER ||
+            die "Unexpected reply type $options1->{message_type} (expected OFFER)";
 
-    $xid = int(($xid+1) % 2**32);
+        $xid = int(($xid+1) % 2**32);
+    }
 
     my $options2;
     if ($request) {
         for my $try (0..$retries) {
             # REQUEST
-            packet_send(REQUEST,
-                        $fou, $interface,
-                        $track ? $options1->{server_addr} : $server_addr,
-                        $xid, $gateway_ip, $mac,
-                        $track ? 0 : $broadcast, $unicast,
-                        defined $hostname ? (hostname	=> $hostname) : (),
-                        request_ip	=> $options1->{your_ip},
-                        server		=> $options1->{server_addr});
+            my $m = packet_send(
+                $inform ? INFORM : REQUEST,
+                $fou, $interface,
+                $track && !$inform ? $options1->{server_addr} : $server_addr,
+                $xid, $gateway_ip, $mac,
+                $track ? 0 : $broadcast, $unicast,
+                defined $hostname ? (hostname	=> $hostname) : (),
+                request_ip => $options1->{your_ip},
+                $inform ? () : (server => $options1->{server_addr}));
 
+            $mac //= $m;
             # ACK
             last if
                 $options2 = packet_receive($recv, $timeout, $xid, $options1->{server}, $mac);
@@ -268,6 +279,7 @@ EOF
 
     if (!$keep) {
         # RELEASE
+        $options2->{your_ip} ne "0.0.0.0" || die "No IP address was assigned";
         packet_send(RELEASE,
                     $fou, $interface,
                     $track ? $options2->{server_addr} : $server_addr,
@@ -294,7 +306,7 @@ dhcp_test - Do a test DHCP exchange
 
 =head1 SYNOPSIS
 
- dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep]
+ dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
            [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
            [-I|--ip <ADDRESS>] [-e|--expect <IP>] [--fou <ADDRESS>]
            [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
@@ -334,6 +346,22 @@ the L<--keep|/keep> option is given.
 
 Do not release the IP address at the end of the exchange
 (don't send the DHCPRELEASE).
+
+=item X<inform>--inform
+
+Don't do a DISCOVER/OFFER/REQUEST/ACK/RELEASE sequence, but just do
+INFORM/ACK instead.
+
+This option is actually not that useful in general because the answer tends to
+go directly to the IP address the DHCP server selects which quite often isn't
+the IP address the program is running on, so the program will not see it and
+time out. The L<--gateway|/gateway> option may work but the DHCP server will
+typically ignore the MAC addres you want to match.
+
+So it is mostly just usable to query information about the local host. For
+example like this:
+
+  dhcp_test --inform -v
 
 =item X<hostname>-H, --hostname I<STRING>
 
@@ -476,15 +504,20 @@ the L<--broadcast|/broadcast> option which controls request packets.
 
 The program will behave like a DHCP relay. All requests will use the given I<IP>
 as the gateway address. The I<IP> argument is optional. If this option is given
-without argument or with an empty argument it will use a local IP address instead (the IP address that
-would be used as source for packets to L<sender|/sender>).
+without argument or with an empty argument it will use a local IP address
+instead (the IP address that would be used as source for packets to
+L<sender|/sender>).
 
 If this option is used the DHCP server will send its responses back to I<IP>.
 So if this is not a local IP the program will normally not see the DHCP response
 so only do that if you have a cunning plan.
 
 Notice that this option is the way you tell a DHCP server to select an address
-from a different subnet than the one with the DGCP server address.
+from a different subnet than the one with the DHCP server address.
+
+Also notice that this option by default will try to listen on port C<67>
+(unless the L<--listen|/listen> option is given) which means you typically
+can't use this on a host that runs a DHCP server or DHCP relay)
 
 =item X<fou>--fou I<ADDRESS>
 
