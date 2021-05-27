@@ -133,6 +133,17 @@ ppm_uninstall:
 	ppm uninstall $(DISTNAME)
 EOT
 
+    # You will need to add your own entry for README.md
+    $postamble{commit} = <<'EOT';
+commit: all README.md
+	release_pm
+	git commit -a
+
+    $postamble{version_check} = <<'EOT';
+all ::
+	$(NOECHO) $(FULLPERL) version_check "$(NAME)" "$(DESTINSTALLSITELIB)" "$(VERSION)" "$(VERSION_FROM)"
+EOT
+
 undef &postamble;	## no critic (UselessNoCritic AmpersandSigils)
 }
 {
@@ -152,32 +163,10 @@ all ::
 	$(NOECHO) $(FULLPERL) version_check "$(NAME)" "$(DESTINSTALLSITELIB)" "$(VERSION)" "$(VERSION_FROM)"
 EOF
 
-    $postamble{ppm} = <<'EOT';
-ppm: $(DISTNAME).ppd
-	$(PERL) bin/makeppd.pl --min_version=1.016 "--zip=$(ZIP)" "--tar=$(TAR)" "--compress=$(COMPRESS)" --leave=ppm $(DISTNAME).ppd $(VERSION)
-EOT
-
-    $postamble{ppm3} = <<'EOT';
-ppm3: $(DISTNAME).ppd
-	$(PERL) bin/makeppd.pl --min_version=1.016 "--zip=$(ZIP)" "--tar=$(TAR)" "--compress=$(COMPRESS)" --ppm_version=3 --leave=ppm3 $(DISTNAME).ppd $(VERSION)
-EOT
-
-    $postamble{ppm4} = <<'EOT';
-ppm4: $(DISTNAME).ppd
-	$(PERL) bin/makeppd.pl --min_version=1.016 "--zip=$(ZIP)" "--tar=$(TAR)" "--compress=$(COMPRESS)" --ppm_version=4 --leave=ppm4 $(DISTNAME).ppd $(VERSION)
-EOT
-
     $postamble{README} = <<'EOT';
 README.md: bin/dhcp_test
-	pod2readme -f github bin/dhcp_test README.md
+	pod2readme -f github $< $@
 
 dist: README.md
-EOT
-
-    $postamble{commit} = <<'EOT';
-commit: all README.md
-	release_pm
-	git commit -a
-
 EOT
 }

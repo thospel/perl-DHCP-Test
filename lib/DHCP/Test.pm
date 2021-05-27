@@ -133,7 +133,7 @@ use Exporter::Tidy
            FORCERENEW LEASEQUERY LEASEUNASSIGNED LEASEUNKNOWN LEASEACTIVE
            BULKLEASEQUERY LEASEQUERYDONE ACTIVELEASEQUERY LEASEQUERYSTATUS TLS)],
     other => [qw($verbose $separator
-                 parse_address packet_send options_parse packet_receive
+                 parse_udp_address packet_send options_parse packet_receive
                  message_type mac_string string_from_value)];
 
 my $request_list =
@@ -237,17 +237,17 @@ sub mac_string {
     return $mac;
 }
 
-sub parse_address {
+sub parse_udp_address {
     my ($str, $context, $default_host, $default_port, $prefer_host) = @_;
 
-    my ($host, $port) = $prefer_host ?
+    my ($host, $port) = $prefer_host && $str !~ /^[0-9]+\z/ ?
         $str =~ /^(?:(.*))(:[^:]*)?\z/ :
         $str =~ /^(?:(.*):)?([^:]*)\z/ or
         die "Could not parse $context '$str'\n";
     if (!defined $host) {
-        $host = $default_host // "127.0.0.1";
+        $host = $default_host // "127.0.0.1" || "0.0.0.0";
     } elsif ($host eq "") {
-        $host = $default_host // "0.0.0.0";
+        $host = $default_host // "0.0.0.0" || "127.0.0.1";
     }
     my $addr = inet_aton($host) || die "Could not resolve $context '$host'\n";
     $port = $port eq "" ? $default_port // die "No port in $context '$str'\n" :

@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "017";
-$release_time = 1617616519;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "018";
+$release_time = 1622123739;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -60,8 +60,8 @@ sub FULL_VERSION {
 
 sub release_time {
     if (!defined $epoch_base) {
-        require Time::Local;
-        $epoch_base = Time::Local::timegm(0,0,0,1,0,1970);	## no critic (UselessNoCritic MagicNumbers)
+	require Time::Local;
+	$epoch_base = Time::Local::timegm(0,0,0,1,0,1970);	## no critic (UselessNoCritic MagicNumbers)
     }
     return $release_time + $epoch_base;
 }
@@ -71,13 +71,13 @@ sub released {
     my $p = $package;
     $p =~ s{::}{/}g;
     my $history = $history{"lib/$p.pm"} ||
-        croak "Could not find a history for package '$package'";
+	croak "Could not find a history for package '$package'";
     my $lowest = 9**9**9;
     for my $v (keys %$history) {
-        $lowest = $v if $v >= $version && $v < $lowest;
+	$lowest = $v if $v >= $version && $v < $lowest;
     }
     croak "No known version '$version' of package '$package'" if
-        $lowest == 9**9**9;
+	$lowest == 9**9**9;
     return $history->{$lowest};
 }
 1;

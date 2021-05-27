@@ -19,7 +19,7 @@ sysctl -w net.ipv4.conf.fou1.rp_filter=0
 
 # Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX
 # Leave operational DHCP replies alone
-iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
+iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
 
 # Make marked packets use routing plane 101
 ip rule add fwmark 17 lookup 101
@@ -88,7 +88,7 @@ use DHCP::Test qw($verbose $separator
                   SO_BINDTODEVICE PROTO_UDP BOOTPC BOOTPS
                   DISCOVER OFFER REQUEST ACK RELEASE INFORM
                   OPTION_HOSTNAME OPTION_REQUEST_IP OPTION_SERVER
-                  parse_address packet_send packet_receive message_type
+                  parse_udp_address packet_send packet_receive message_type
                   string_from_value);
 use DHCP::Test::Package;
 
@@ -181,7 +181,7 @@ EOF
     $broadcast = 1 if !defined $broadcast && !$server_ip;
     my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
         die "Could not resolve server IP '$server_ip'";
-    $fou = parse_address($fou, "fou receiver", "127.0.0.1") if defined $fou;
+    $fou = parse_udp_address($fou, "fou receiver", "127.0.0.1") if defined $fou;
 
     socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
         die "Could not create socket: $^E";
@@ -189,7 +189,7 @@ EOF
     #    die "Could not setsockopt SO_BROADCAST: $^E";
     # setsockopt($recv, SOL_SOCKET, SO_REUSEADDR, 1) ||
     #    die "Could not setsockopt SO_REUSEADDR: $^E";
-    my $from = parse_address(
+    my $from = parse_udp_address(
         $listen // "",
         "listen address",
         "0.0.0.0",
@@ -617,9 +617,9 @@ address we hold one to it (-k). Send using FOU over port 1237 and listen for
 
    dhcp_test -s 0.0.0.1 -e 10.253.0.8 -m BA:D1:XX:XX:XX:XX -H pluto -k -g 10.254.0.14 -i eth0 -l 1236 --fou 1237
 
-We assume here we are running on C<10.254.0.8> which is also the host with a
+We assume here we are running on C<10.253.0.8> which is also the host with a
 DHCP server (which snoops the otherwise meaningless packets to C<0.0.0.1>). So
-we won't seee the answer to C<10.254.0.14> and would normally time out. On linux
+we won't see the answer to C<10.254.0.14> and would normally time out. On linux
 we can set up a FOU tunnel that catches the response:
 
    # Set up FOU tunnel. Notice that we listen on the output port of the tunnel
@@ -632,14 +632,14 @@ we can set up a FOU tunnel that catches the response:
    sysctl -w net.ipv4.conf.all.rp_filter=0
    sysctl -w net.ipv4.conf.fou1.rp_filter=0
 
-   # Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX
+   # Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX and mark them
    # Leave operational DHCP replies alone
-   iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
+   iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
 
    # Make marked packets use routing plane 101
    ip rule add fwmark 17 lookup 101
 
-   # Route everything in routing plane 101 to the FOU tunnel:
+   # Route everything in routing plane 101 into the FOU tunnel:
    ip route add default via 10.253.4.1 table 101
 
 =head1 BUGS
