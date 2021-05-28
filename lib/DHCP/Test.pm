@@ -241,7 +241,7 @@ sub parse_udp_address {
     my ($str, $context, $default_host, $default_port, $prefer_host) = @_;
 
     my ($host, $port) = $prefer_host && $str !~ /^[0-9]+\z/ ?
-        $str =~ /^(?:(.*))(:[^:]*)?\z/ :
+        $str =~ /^(.*?)(?::([^:]*))?\z/ :
         $str =~ /^(?:(.*):)?([^:]*)\z/ or
         die "Could not parse $context '$str'\n";
     if (!defined $host) {
@@ -250,7 +250,7 @@ sub parse_udp_address {
         $host = $default_host // "0.0.0.0" || "127.0.0.1";
     }
     my $addr = inet_aton($host) || die "Could not resolve $context '$host'\n";
-    $port = $port eq "" ? $default_port // die "No port in $context '$str'\n" :
+    $port = !defined $port || $port eq "" ? $default_port // die "No port in $context '$str'\n" :
         $port =~ /^0\z|^[1-9][0-9]*\z/ ? int($port) :
         getservbyname($port, "udp") // die "Unknown UDP service '$port'\n";
     die "Port '$port' is out of range" if $port >= 2**16;
@@ -291,7 +291,7 @@ sub options_build {
                 croak "$value > 65535" if $value > 65535;
                 $value = pack("n", $value);
             } elsif ($otype == TYPE_ADDR) {
-                length $value == 4 || croak "Invalid IPv4 address size";
+                length $value == 4 || croak sprintf("Invalid IPv4 address size (length %d)", length $value);
             } elsif ($otype == TYPE_STRING) {
             } elsif ($otype == TYPE_IP) {
                 $value = inet_aton($value) // croak "Invalid ip '$value'";
@@ -302,7 +302,7 @@ sub options_build {
                 length $value >= 256;
             $str .= pack("WW/a*", $tag, $value);
         };
-        die "Option $name: $@" if $@;
+        die "Option '$name': $@" if $@;
     }
     return $str . pack("W", OPTION_END);
 }
@@ -430,7 +430,6 @@ sub fou {
         print("SPRT=$sprt, DPRT=$dprt, LEN=$udp_len, CHK=$udp_chksum\n" .
               "Encapsulated FOU packet from $src:$sprt to $dst:$dprt\n");
     }
-
     my $rc = syswrite($sender, $buffer) //
         die "Could not send message: $^E";
     length $buffer == $rc ||
@@ -438,7 +437,7 @@ sub fou {
 }
 
 sub packet_send {
-    my ($type, $fou, $interface, $target, $xid, $gateway_ip, $mac,
+    my ($type, $fou, $interface, $to, $xid, $gateway_ip, $mac,
         $broadcast, $unicast, %options) = @_;
 
     croak "Missing mandatory option 'request_ip'" if
@@ -465,8 +464,6 @@ sub packet_send {
     # bind($sender, $from) or die "Could not bind: $^E";
     # my $from = pack_sockaddr_in(0, inet_aton("192.168.59.142"));
     #bind($sender, $from) or die "Could not bind: $^E";
-    my $to = pack_sockaddr_in(BOOTPS, $target);
-    # connect($sender, $fou ? pack_sockaddr_in(BOOTPS, inet_aton("0.0.0.2")) : $to) or die "Could not connect: $^E";
     connect($sender, $to) or die "Could not connect: $^E";
     my $from = getsockname($sender) // die "Could not getsockname: $^E";
     my ($port, $from_addr) = unpack_sockaddr_in($from);
@@ -515,8 +512,11 @@ sub packet_send {
         length $buffer == $rc ||
             die "Sent truncated DHCP message\n";
     }
-    printf("%s\nDHCP%s sent to %s\n",
-           $separator, message_type($type), inet_ntoa($target)) if $verbose >= 2;
+    if ($verbose >= 2) {
+        my ($port, $addr) = unpack_sockaddr_in($to);
+        printf("%s\nDHCP%s sent to %s:%d\n",
+               $separator, message_type($type), inet_ntoa($addr), $port);
+    }
     return $mac;
 }
 
@@ -707,6 +707,7 @@ sub packet_receive {
         $reply_xid == $xid || next;
         !$expect_addr || $server_addr eq $expect_addr || next;
         my %option = (
+            server_packed => pack_sockaddr_in($server_port, $server_addr),
             server_addr	=> $server_addr,
             server_ip	=> inet_ntoa($server_addr),
             server_port	=> $server_port,

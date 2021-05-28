@@ -8,8 +8,10 @@ use warnings;
 On 10.253.0.8
 
 # Set up FOU tunnel. Notice that we listen on the output port of the tunnel
+modprobe fou
 ip link add name fou1 type ipip remote 127.0.0.1 local 127.0.0.1 ttl 225 encap fou encap-sport auto encap-dport 1236
 ip addr add 10.253.4.1/24 dev fou1
+ip link set fou1 up
 # Decapsulator
 ip fou add port 1237 ipproto 4 local 127.0.0.1
 
@@ -179,8 +181,7 @@ EOF
         $mac = pack("H*", $mac);
     }
     $broadcast = 1 if !defined $broadcast && !$server_ip;
-    my $server_addr = inet_aton($server_ip || "255.255.255.255") ||
-        die "Could not resolve server IP '$server_ip'";
+    my $server_packed = parse_udp_address($server_ip || "255.255.255.255", "server ip", "255.255.255.255", BOOTPS, 1);
     $fou = parse_udp_address($fou, "fou receiver", "127.0.0.1") if defined $fou;
 
     socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
@@ -212,7 +213,7 @@ EOF
             # DISCOVER
             $mac = packet_send(
                 DISCOVER,
-                $fou, $interface, $server_addr, $xid, $gateway_ip, $mac,
+                $fou, $interface, $server_packed, $xid, $gateway_ip, $mac,
                 $broadcast, $unicast,
                 defined $hostname ? (hostname => $hostname) : (),
                 $request_ip ? (request_ip => $request_ip) : (),
@@ -240,7 +241,7 @@ EOF
             my $m = packet_send(
                 $inform ? INFORM : REQUEST,
                 $fou, $interface,
-                $track && !$inform ? $options1->{server_addr} : $server_addr,
+                $track && !$inform ? $options1->{server_packed} : $server_packed,
                 $xid, $gateway_ip, $mac,
                 $track ? 0 : $broadcast, $unicast,
                 defined $hostname ? (hostname	=> $hostname) : (),
@@ -282,7 +283,7 @@ EOF
         $options2->{your_ip} ne "0.0.0.0" || die "No IP address was assigned";
         packet_send(RELEASE,
                     $fou, $interface,
-                    $track ? $options2->{server_addr} : $server_addr,
+                    $track ? $options2->{server_packed} : $server_packed,
                     $xid, $gateway_ip, $mac,
                     $track ? 0 : $broadcast, $unicast,
                     defined $hostname ? (hostname	=> $hostname) : (),
@@ -468,8 +469,8 @@ the selected DHCPOFFER response.
 
 =item X<broadcast>-b, --broadcast
 
-This option defaults to true if no L<--server|/server> option is give. Otherwise
-it defaults to false.
+This option defaults to true if no L<--server|/server> option is givem.
+Otherwise it defaults to false.
 
 If this option is true the broadcast flag is applied to the socket sending the
 DHCPDISCOVER request. This is needed on most operating systems to be allowed
@@ -623,9 +624,12 @@ we won't see the answer to C<10.254.0.14> and would normally time out. On linux
 we can set up a FOU tunnel that catches the response:
 
    # Set up FOU tunnel. Notice that we listen on the output port of the tunnel
+   modprobe fou
    ip link add name fou1 type ipip remote 127.0.0.1 local 127.0.0.1 ttl 225 encap fou encap-sport auto encap-dport 1236
    ip addr add 10.253.4.1/24 dev fou1
+   ip link set fou1 up
    # Decapsulator
+   # Remove the "local 127.0.0.1" on older versions of linux
    ip fou add port 1237 ipproto 4 local 127.0.0.1
 
    # Allow these weird outgoing FOU packets

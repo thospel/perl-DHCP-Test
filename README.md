@@ -174,8 +174,8 @@ Valid options are:
 
 - -b, --broadcast
 
-    This option defaults to true if no [--server](#server) option is give. Otherwise
-    it defaults to false.
+    This option defaults to true if no [--server](#server) option is givem.
+    Otherwise it defaults to false.
 
     If this option is true the broadcast flag is applied to the socket sending the
     DHCPDISCOVER request. This is needed on most operating systems to be allowed
@@ -335,30 +335,33 @@ address we hold one to it (-k). Send using FOU over port 1237 and listen for
 dhcp_test -s 0.0.0.1 -e 10.253.0.8 -m BA:D1:XX:XX:XX:XX -H pluto -k -g 10.254.0.14 -i eth0 -l 1236 --fou 1237
 ```
 
-We assume here we are running on `10.254.0.8` which is also the host with a
+We assume here we are running on `10.253.0.8` which is also the host with a
 DHCP server (which snoops the otherwise meaningless packets to `0.0.0.1`). So
-we won't seee the answer to `10.254.0.14` and would normally time out. On linux
+we won't see the answer to `10.254.0.14` and would normally time out. On linux
 we can set up a FOU tunnel that catches the response:
 
 ```perl
 # Set up FOU tunnel. Notice that we listen on the output port of the tunnel
+modprobe fou
 ip link add name fou1 type ipip remote 127.0.0.1 local 127.0.0.1 ttl 225 encap fou encap-sport auto encap-dport 1236
 ip addr add 10.253.4.1/24 dev fou1
+ip link set fou1 up
 # Decapsulator
+# Remove the "local 127.0.0.1" on older versions of linux
 ip fou add port 1237 ipproto 4 local 127.0.0.1
 
 # Allow these weird outgoing FOU packets
 sysctl -w net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.conf.fou1.rp_filter=0
 
-# Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX
+# Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX and mark them
 # Leave operational DHCP replies alone
-iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
+iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
 
 # Make marked packets use routing plane 101
 ip rule add fwmark 17 lookup 101
 
-# Route everything in routing plane 101 to the FOU tunnel:
+# Route everything in routing plane 101 into the FOU tunnel:
 ip route add default via 10.253.4.1 table 101
 ```
 
