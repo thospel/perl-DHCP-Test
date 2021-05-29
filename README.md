@@ -8,8 +8,8 @@ dhcp\_test - Do a test DHCP exchange
 dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
           [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
           [-I|--ip <ADDRESS>] [-e|--expect <IP>] [--fou <ADDRESS>]
-          [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
-          [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
+          [-s|--server <ADDRESS>] [-T|--track] [-i|--interface <string>]
+          [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]] [--ttl <INT>]
           [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
 dhcp_test [--version] [-U | --unsafe] [-h | --help]
 ```
@@ -142,14 +142,17 @@ Valid options are:
     All DHCP responses (not just DHCPOFFER) are checked for coming from port 67
     (irrespective of the value of this option.
 
-- -s, --server _IP_
+- -s, --server _ADDRESS_
 
-    Send DHCP requests to the given _IP_. If this option is not given it will
-    use the broadcast address _255.255.255.255_.
+    Send DHCP requests to the given _ADDRESS_. If this option is not given it will
+    use the broadcast address _255.255.255.255:67_.
+
+    _ADDRESS_ can be given as _HOST:PORT_ or as just _HOST_ in which case it uses
+    the standard DHCP port (port 67).
 
     Notice that [--expect](#expect) option may still be needed since since the
-    answers don't always come from from server _ip_, e.g, with a multihomed DHCP
-    server.
+    answers don't always come from this server _ADDRESS_, e.g, with a multihomed
+    DHCP server.
     And there is always a chance that some other DHCP server sends a response which
     just happens to match all relevant properties (mostly MAC address and
     transaction ID). This is less theoretical than it may seem because some DHCP
@@ -224,6 +227,12 @@ Valid options are:
     Also notice that this option by default will try to listen on port `67`
     (unless the [--listen](#listen) option is given) which means you typically
     can't use this on a host that runs a DHCP server or DHCP relay)
+
+- --ttl _INT_
+
+    Sends the request packets with the given Time to live (hop limit). This is
+    a way in which you can avoid a packet from traveling too far. This will
+    typically only make sense if you are not doing a broadcast.
 
 - --fou _ADDRESS_
 
@@ -356,7 +365,7 @@ sysctl -w net.ipv4.conf.fou1.rp_filter=0
 
 # Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX and mark them
 # Leave operational DHCP replies alone
-iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
+iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1 && 0>>22&0x3C@5&0xff=0x02" -j MARK --set-mark 17
 
 # Make marked packets use routing plane 101
 ip rule add fwmark 17 lookup 101

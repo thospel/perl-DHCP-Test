@@ -6,6 +6,7 @@ our $VERSION = "1.000";
 
 use Carp;
 use Socket qw(INADDR_ANY PF_INET SOCK_DGRAM SOL_SOCKET SO_BROADCAST
+              IPPROTO_IP IP_TTL
               pack_sockaddr_in unpack_sockaddr_in inet_ntoa inet_aton);
 use IO::Interface::Simple;
 use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC );
@@ -308,7 +309,7 @@ sub options_build {
 }
 
 sub fou {
-    my ($fou, $to, $txt) = @_;
+    my ($fou, $ttl, $from, $to, $txt) = @_;
 
     my ($fou_port, $fou_addr) = unpack_sockaddr_in($fou);
     my $fou_ip   = inet_ntoa($fou_addr);
@@ -318,9 +319,7 @@ sub fou {
     connect($sender, $fou) or die "Could not connect to $fou_ip:$fou_port: $^E";
 
     my ($dprt, $dst) = unpack_sockaddr_in($to);
-    my $sprt = BOOTPC;
-    # my $src = INADDR_ANY;
-    my $src = inet_aton("0.0.0.1");
+    my ($sprt, $src) = unpack_sockaddr_in($from);
 
     my $packet_id = int rand 2**16;
     my $flags = $DF;
@@ -336,7 +335,7 @@ sub fou {
                       $packet_id,
                       $DF << 13 | 0,
                       # Avoid real outgoing packet if we are sending to 0.X.X.X
-                      $dst =~ /^\0/ ? $TTL_LOW : $TTL,
+                      $ttl // ($dst =~ /^\0/ ? $TTL_LOW : $TTL),
                       PROTO_UDP,
                       $src,
                       $dst,
@@ -437,7 +436,7 @@ sub fou {
 }
 
 sub packet_send {
-    my ($type, $fou, $interface, $to, $xid, $gateway_ip, $mac,
+    my ($type, $fou, $interface, $to, $ttl, $xid, $gateway_ip, $mac,
         $broadcast, $unicast, %options) = @_;
 
     croak "Missing mandatory option 'request_ip'" if
@@ -466,7 +465,7 @@ sub packet_send {
     #bind($sender, $from) or die "Could not bind: $^E";
     connect($sender, $to) or die "Could not connect: $^E";
     my $from = getsockname($sender) // die "Could not getsockname: $^E";
-    my ($port, $from_addr) = unpack_sockaddr_in($from);
+    my ($fport, $from_addr) = unpack_sockaddr_in($from);
     my $from_ip = inet_ntoa($from_addr);
     $gateway_ip = $from_ip if defined $gateway_ip && $gateway_ip eq "";
     if (!$mac) {
@@ -505,8 +504,10 @@ sub packet_send {
                              %options,
                              message_type => $type);
     if ($fou) {
-        fou($fou, $to, $buffer);
+        fou($fou, $ttl, $gateway_ip ? pack_sockaddr_in(BOOTPS, inet_aton($gateway_ip)) : pack_sockaddr_in(BOOTPC, inet_aton("0.0.0.1")), $to, $buffer);
     } else {
+        !defined $ttl || setsockopt($sender, IPPROTO_IP, IP_TTL, int($ttl)) ||
+            die "Could not set TTL: $^E";
         my $rc = syswrite($sender, $buffer) //
             die "Could not send message: $^E";
         length $buffer == $rc ||

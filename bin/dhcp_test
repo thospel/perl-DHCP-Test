@@ -20,8 +20,9 @@ sysctl -w net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.conf.fou1.rp_filter=0
 
 # Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX
+# (See http://www.stearns.org/doc/iptables-u32.current.html)
 # Leave operational DHCP replies alone
-iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
+iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1 && 0>>22&0x3C@5&0xff=0x02" -j MARK --set-mark 17
 
 # Make marked packets use routing plane 101
 ip rule add fwmark 17 lookup 101
@@ -48,7 +49,7 @@ dhcp_test -v -g 10.254.0.14  -s 0.0.0.1 -l 1236 -r 0 -e 10.253.0.8 -m BA:D1 --fo
 # destination address. I always get a mask of /32 however I add the filter
 # Either I do something wrong or its a bug or what I want is impossible:
 #
-# iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 18
+# iptables -t mangle -A OUTPUT -p udp --dport 67 --sport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1 && 0>>22&0x3C@5&0xff=0x02" -j MARK --set-mark 18
 # tc qdisc del add eno1 root handle 1 htb
 # tc filter add dev eno1 parent 1: protocol ip prio 8 handle 18 fw action nat ingress any 10.253.0.14/16
 # tc filter show dev eno1
@@ -115,6 +116,7 @@ eval {
                    "i|interface=s"	=> \my $interface,
                    "I|ip=s"		=> \my $request_ip,
                    "m|mac:s"		=> \my $mac,
+                   "ttl=o"		=> \my $ttl,
                    "H|hostname:s"	=> \my $hostname,
                    "l|listen=s"		=> \my $listen,
                    # do DHCP relay request. Answer is on port 67. Not supported yet
@@ -162,6 +164,7 @@ EOF
         inet_aton($request_ip) ||
         die("Could not resolve request IP '$request_ip'\n")) if
             defined $request_ip;
+    !defined $ttl || 0 < $ttl && $ttl < 256 || die "Invalid TTL '$ttl'\n";
     $xid = unpack("N", inet_aton($xid) // die "Could not resolve xid '$xid'");
     if (defined $mac) {
         $mac =~ /^[0-9A-FX:. ]*\z/i || die "Invalid MAC '$mac'\n";
@@ -213,7 +216,7 @@ EOF
             # DISCOVER
             $mac = packet_send(
                 DISCOVER,
-                $fou, $interface, $server_packed, $xid, $gateway_ip, $mac,
+                $fou, $interface, $server_packed, $ttl, $xid, $gateway_ip, $mac,
                 $broadcast, $unicast,
                 defined $hostname ? (hostname => $hostname) : (),
                 $request_ip ? (request_ip => $request_ip) : (),
@@ -242,7 +245,7 @@ EOF
                 $inform ? INFORM : REQUEST,
                 $fou, $interface,
                 $track && !$inform ? $options1->{server_packed} : $server_packed,
-                $xid, $gateway_ip, $mac,
+                $ttl, $xid, $gateway_ip, $mac,
                 $track ? 0 : $broadcast, $unicast,
                 defined $hostname ? (hostname	=> $hostname) : (),
                 request_ip => $options1->{your_ip},
@@ -284,7 +287,7 @@ EOF
         packet_send(RELEASE,
                     $fou, $interface,
                     $track ? $options2->{server_packed} : $server_packed,
-                    $xid, $gateway_ip, $mac,
+                    $ttl, $xid, $gateway_ip, $mac,
                     $track ? 0 : $broadcast, $unicast,
                     defined $hostname ? (hostname	=> $hostname) : (),
                     request_ip	=> $options2->{your_ip},
@@ -310,8 +313,8 @@ dhcp_test - Do a test DHCP exchange
  dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
            [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
            [-I|--ip <ADDRESS>] [-e|--expect <IP>] [--fou <ADDRESS>]
-           [-s|--server <IP>] [-T|--track] [-i|--interface <string>]
-           [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]]
+           [-s|--server <ADDRESS>] [-T|--track] [-i|--interface <string>]
+           [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]] [--ttl <INT>]
            [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
  dhcp_test [--version] [-U | --unsafe] [-h | --help]
 
@@ -437,14 +440,17 @@ will always be used for DHCP response selection in the following steps.
 All DHCP responses (not just DHCPOFFER) are checked for coming from port 67
 (irrespective of the value of this option.
 
-=item X<server>-s, --server I<IP>
+=item X<server>-s, --server I<ADDRESS>
 
-Send DHCP requests to the given I<IP>. If this option is not given it will
-use the broadcast address I<255.255.255.255>.
+Send DHCP requests to the given I<ADDRESS>. If this option is not given it will
+use the broadcast address I<255.255.255.255:67>.
+
+I<ADDRESS> can be given as I<HOST:PORT> or as just I<HOST> in which case it uses
+the standard DHCP port (port 67).
 
 Notice that L<--expect|/expect> option may still be needed since since the
-answers don't always come from from server I<ip>, e.g, with a multihomed DHCP
-server.
+answers don't always come from this server I<ADDRESS>, e.g, with a multihomed
+DHCP server.
 And there is always a chance that some other DHCP server sends a response which
 just happens to match all relevant properties (mostly MAC address and
 transaction ID). This is less theoretical than it may seem because some DHCP
@@ -519,6 +525,12 @@ from a different subnet than the one with the DHCP server address.
 Also notice that this option by default will try to listen on port C<67>
 (unless the L<--listen|/listen> option is given) which means you typically
 can't use this on a host that runs a DHCP server or DHCP relay)
+
+=item X<ttl>--ttl I<INT>
+
+Sends the request packets with the given Time to live (hop limit). This is
+a way in which you can avoid a packet from traveling too far. This will
+typically only make sense if you are not doing a broadcast.
 
 =item X<fou>--fou I<ADDRESS>
 
@@ -638,7 +650,7 @@ we can set up a FOU tunnel that catches the response:
 
    # Match DHCP replies about MAC address BA:D1:XX:XX:XX:XX and mark them
    # Leave operational DHCP replies alone
-   iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1" -j MARK --set-mark 17
+   iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF=0 && 0>>22&0x3C@34&0xffff=0xbad1 && 0>>22&0x3C@5&0xff=0x02" -j MARK --set-mark 17
 
    # Make marked packets use routing plane 101
    ip rule add fwmark 17 lookup 101
