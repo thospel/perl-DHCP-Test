@@ -28,7 +28,7 @@ iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF
 ip rule add fwmark 17 lookup 101
 
 # Route everything in routing plane 101 to the FOU tunnel:
-# ip route add default via 10.253.4.1 table 101
+ip route add default via 10.253.4.1 table 101
 
 # Experiments with -t nat failed because this implicitely uses tracked
 # connections and all these port 67 to port 67 packets fall into the same
@@ -91,6 +91,7 @@ use DHCP::Test qw($verbose $separator
                   SO_BINDTODEVICE PROTO_UDP BOOTPC BOOTPS
                   DISCOVER OFFER REQUEST ACK RELEASE INFORM
                   OPTION_HOSTNAME OPTION_REQUEST_IP OPTION_SERVER
+                  AGENT_CIRCUIT_ID AGENT_REMOTE_ID
                   parse_udp_address packet_send packet_receive message_type
                   string_from_value);
 use DHCP::Test::Package;
@@ -121,6 +122,8 @@ eval {
                    "l|listen=s"		=> \my $listen,
                    # do DHCP relay request. Answer is on port 67. Not supported yet
                    "g|gateway:s"	=> \my $gateway_ip,
+                   "circuit_id=s"	=> \my $cid,
+                   "remote_id=s"	=> \my $rid,
                    "u|unicast!"		=> \my $unicast,
                    "b|broadcast!"	=> \my $broadcast,
                    "T|track!"		=> \my $track,
@@ -186,6 +189,10 @@ EOF
     $broadcast = 1 if !defined $broadcast && !$server_ip;
     my $server_packed = parse_udp_address($server_ip || "255.255.255.255", "server ip", "255.255.255.255", BOOTPS, 1);
     $fou = parse_udp_address($fou, "fou receiver", "127.0.0.1") if defined $fou;
+    my %agent_info = (
+        defined $cid ? (AGENT_CIRCUIT_ID() => $cid) : (),
+        defined $rid ? (AGENT_REMOTE_ID () => $rid) : (),
+    );
 
     socket(my $recv, PF_INET, SOCK_DGRAM, PROTO_UDP) ||
         die "Could not create socket: $^E";
@@ -220,6 +227,7 @@ EOF
                 $broadcast, $unicast,
                 defined $hostname ? (hostname => $hostname) : (),
                 $request_ip ? (request_ip => $request_ip) : (),
+                %agent_info ? (agent_info => \%agent_info) : (),
             );
 
             # OFFER
@@ -249,7 +257,9 @@ EOF
                 $track ? 0 : $broadcast, $unicast,
                 defined $hostname ? (hostname	=> $hostname) : (),
                 request_ip => $options1->{your_ip},
-                $inform ? () : (server => $options1->{server_addr}));
+                $inform ? () : (server => $options1->{server_addr}),
+                %agent_info ? (agent_info => \%agent_info) : (),
+            );
 
             $mac //= $m;
             # ACK
@@ -292,7 +302,9 @@ EOF
                     defined $hostname ? (hostname	=> $hostname) : (),
                     request_ip	=> $options2->{your_ip},
                     server => $options2->{server_addr},
-                    message => "dhcp_test is done testing");
+                    message => "$Script is done testing",
+                    %agent_info ? (agent_info => \%agent_info) : (),
+                );
     }
 };
 if ($@) {
@@ -315,6 +327,7 @@ dhcp_test - Do a test DHCP exchange
            [-I|--ip <ADDRESS>] [-e|--expect <IP>] [--fou <ADDRESS>]
            [-s|--server <ADDRESS>] [-T|--track] [-i|--interface <string>]
            [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]] [--ttl <INT>]
+           [--circuit_id <STRING>] [--remote_id <STRING>]
            [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
  dhcp_test [--version] [-U | --unsafe] [-h | --help]
 
@@ -457,6 +470,20 @@ transaction ID). This is less theoretical than it may seem because some DHCP
 servers snoop network traffic and respond to requests even if the request is
 specifically not addressed to them.
 
+Note about the ISC DHCP server (and possibly other DHCP servers).
+
+The ISC DHCP server listens on RAW IP sockets bound to the configured ethernet
+interfaces and filters for IP packets with destination port 67. It also binds
+to a normal UDP socket on port 67 which is meant for outgoing packets. Any
+packets that arriove on this interface will be discarded. This means that if you
+use the L<--server|/server> option to point to the DHCP server on the host
+itself this won't work. The packet goes over the loopback and won't match the
+RAW packet filter. Instead the packet will arrive on the normal UDP socket
+and get discarded. What B<DOES> work is using any address that will route over
+an interface the DHCP server listens on. Use this in combination with the
+L<--ttl|/ttl> option to avoid traffic to this address actually arriving
+(the packet will however still do at least 1 hop)
+
 =item X<interface>-i, --interface I<string>
 
 Bind the sending socket to the named interface (e.g. I<eth0>). This can be
@@ -517,20 +544,34 @@ L<sender|/sender>).
 
 If this option is used the DHCP server will send its responses back to I<IP>.
 So if this is not a local IP the program will normally not see the DHCP response
-so only do that if you have a cunning plan.
+so only do that if you have a cunning plan (see the EXAMPLE section for these)
 
 Notice that this option is the way you tell a DHCP server to select an address
 from a different subnet than the one with the DHCP server address.
 
 Also notice that this option by default will try to listen on port C<67>
-(unless the L<--listen|/listen> option is given) which means you typically
-can't use this on a host that runs a DHCP server or DHCP relay)
+which means you typically can't use this on a host that runs a DHCP server or
+DHCP relay. That is unless the L<--listen|/listen> option is given which allows
+you to wait for responses from another port combined with a cunning plan to
+make sure responses get to this port (again see the EXAMPLE section)
 
 =item X<ttl>--ttl I<INT>
 
 Sends the request packets with the given Time to live (hop limit). This is
 a way in which you can avoid a packet from traveling too far. This will
 typically only make sense if you are not doing a broadcast.
+
+=item X<circuit_id>--circuit_id I<STRING>
+
+Pass the given string as the Circuit ID Sub-option in a Relay Agent Information
+Option. The Sub-option is not sent if this option is not given. Normally only
+used in combination with the L<gateway|/gateway> option.
+
+=item X<remote_id>--remote_id I<STRING>
+
+Pass the given string as the Remote ID Sub-option in a Relay Agent Information
+Option. The Sub-option is not sent if this option is not given. Normally only
+used in combination with the L<gateway|/gateway> option.
 
 =item X<fou>--fou I<ADDRESS>
 
@@ -542,8 +583,12 @@ which case the host defaults to C<127.0.0.1>.
 If this option is given the outgoing packet is encapsulated and then sent to
 I<ADDRESS> which is responsible for decapsulating it.
 
-This option allows the program to send packets that it otherwsie cannot
+This option allows the program to send packets that it otherwise cannot
 (because the user lacks permission to construct such packets).
+
+In general avoid this option. It will need IP forwarding, it won't work if the
+source address is a local IP address amd most (all ?) DHCP servers don't care
+about the source port of the packet so it isn't needed.
 
 =item X<listen>-l, --listen I<ADDRESS>
 

@@ -75,6 +75,7 @@ use constant {
     OPTION_SMTP		=>  69,
     OPTION_NNTP		=>  71,
     OPTION_WWW		=>  72,
+    OPTION_AGENT_INFO	=>  82,
     # I use 150 to set the GRUB configuration path name (semi standard)
     OPTION_GRUB		=> 150,
     # OPTION_PXE_LINUX	=> 208,
@@ -88,13 +89,18 @@ use constant {
     TYPE_IP		=>  2,
     TYPE_IPS		=>  3,
     TYPE_STRING		=>  4,
-    TYPE_INT		=>  5,
-    TYPE_UINT8		=>  6,
-    TYPE_UINT8S		=>  7,
-    TYPE_UINT16		=>  8,
-    TYPE_UINT		=>  9,
-    TYPE_FLAG		=> 10,
-    TYPE_IP_PORT_PORT	=> 11,
+    TYPE_STRING_HASH	=>  5,
+    TYPE_INT		=>  6,
+    TYPE_UINT8		=>  7,
+    TYPE_UINT8S		=>  8,
+    TYPE_UINT16		=>  9,
+    TYPE_UINT		=> 10,
+    TYPE_FLAG		=> 11,
+    TYPE_IP_PORT_PORT	=> 12,
+
+    # Agent information SubOptions
+    AGENT_CIRCUIT_ID   => 1,
+    AGENT_REMOTE_ID	=> 2,
 
     # Request list
     REQUEST_SUBNET		=>   1,
@@ -128,7 +134,9 @@ use Exporter::Tidy
                    OPTION_TYPE OPTION_SERVER OPTION_REQUEST_LIST OPTION_MESSAGE
                    OPTION_SIZE_MAX OPTION_RENEWAL_TIME OPTION_REBIND_TIME
                    OPTION_BOOT_SERVER OPTION_BOOT_FILE OPTION_SMTP OPTION_NNTP
-                   OPTION_WWW OPTION_GRUB OPTION_PROXY OPTION_SOCKS OPTION_END)],
+                   OPTION_WWW OPTION_GRUB OPTION_PROXY OPTION_SOCKS OPTION_END
+                   OPTION_AGENT_INFO
+                   AGENT_CIRCUIT_ID AGENT_REMOTE_ID)],
     message_types => [
         qw(DISCOVER OFFER REQUEST DECLINE ACK NAK RELEASE INFORM
            FORCERENEW LEASEQUERY LEASEUNASSIGNED LEASEUNKNOWN LEASEACTIVE
@@ -154,6 +162,7 @@ my $request_list =
          REQUEST_NTP);
 
 my %option_types = (
+    OPTION_AGENT_INFO()		=> [TYPE_STRING_HASH, "agent_info"],
     OPTION_BOOT_FILE()		=> [TYPE_STRING, "boot_file"],
     OPTION_BOOT_SERVER()	=> [TYPE_STRING, "boot_server"],
     OPTION_BROADCAST()		=> [TYPE_IP, "braodcast"],
@@ -175,7 +184,7 @@ my %option_types = (
     OPTION_REQUEST_LIST()	=> [TYPE_UINT8S, "request_list"],
     OPTION_ROUTER()		=> [TYPE_IP, "router"],
     OPTION_SERVER()		=> [TYPE_ADDR, "server", ""],
-    OPTION_SIZE_MAX()		=> [TYPE_UINT16, "size_max", "Max Packet Size"],
+    OPTION_SIZE_MAX()		=> [TYPE_UINT16, "size_max", "max_packet_size"],
     OPTION_SMTP()		=> [TYPE_IPS, "smtp", "SMTP"],
     OPTION_SOCKS()		=> [TYPE_IP, "socks"],
     OPTION_TIME_OFFSET()	=> [TYPE_INT, "time_offset"],
@@ -211,6 +220,14 @@ my %message_type = (
     ACTIVELEASEQUERY()	=> "ACTIVELEASEQUERY",
     LEASEQUERYSTATUS()	=> "LEASEQUERYSTATUS",
     TLS()		=> "TLS",
+);
+
+# Map sub-option ids to human readable names
+my %string_hash_keys = (
+    OPTION_AGENT_INFO() => {
+        AGENT_CIRCUIT_ID()	=> "Circuit Id",
+        AGENT_REMOTE_ID ()	=> "Remote Id",
+    },
 );
 
 my $IP_VERSION = 4;
@@ -294,6 +311,15 @@ sub options_build {
             } elsif ($otype == TYPE_ADDR) {
                 length $value == 4 || croak sprintf("Invalid IPv4 address size (length %d)", length $value);
             } elsif ($otype == TYPE_STRING) {
+            } elsif ($otype == TYPE_STRING_HASH) {
+                my $tmp = "";
+                for my $id (sort keys %$value) {
+                    length $value->{$id} < 256 ||
+                        croak sprintf("Subcommand %d value too long: %s",
+                                      $id, string_from_value($value->{$id}));
+                    $tmp .= pack("WW/a*", $id, $value->{$id});
+                }
+                $value = $tmp;
             } elsif ($otype == TYPE_IP) {
                 $value = inet_aton($value) // croak "Invalid ip '$value'";
             } else {
@@ -483,7 +509,7 @@ sub packet_send {
 		      BOOTREQUEST, # Message opcode
 		      HW_ETHERNET, # Hardware type
 		      6,           # Hardware addr length (6 bytes) <= 16
-		      0,           # Max Hops
+		      $gateway_ip ? 1 : 0,	# Hop count (+1 for each relay)
 		      $xid,
 		      0,           # secs
                       $unicast ? 0 : FLAG_BROADCAST,	# flags
@@ -555,6 +581,15 @@ sub options_parse {
                 $options->{$name} = $value;
             } elsif ($otype == TYPE_STRING) {
                 $options->{$name} = $value;
+            } elsif ($otype == TYPE_STRING_HASH) {
+                my %hash = unpack("(WW/a*)*", $value);
+                if (my $translate = $string_hash_keys{$tag}) {
+                    for my $key (keys %hash) {
+                        $hash{$translate->{$key}} = delete $hash{$key} if
+                            exists $translate->{$key};
+                    }
+                }
+                $options->{$name} = \%hash;
             } elsif ($otype == TYPE_UINT) {
                 length $value == 4 || die "Unexpected $name length";
                 $options->{$name} = unpack("N", $value);

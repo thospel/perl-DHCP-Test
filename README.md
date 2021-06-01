@@ -10,6 +10,7 @@ dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
           [-I|--ip <ADDRESS>] [-e|--expect <IP>] [--fou <ADDRESS>]
           [-s|--server <ADDRESS>] [-T|--track] [-i|--interface <string>]
           [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]] [--ttl <INT>]
+          [--circuit_id <STRING>] [--remote_id <STRING>]
           [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
 dhcp_test [--version] [-U | --unsafe] [-h | --help]
 ```
@@ -159,6 +160,20 @@ Valid options are:
     servers snoop network traffic and respond to requests even if the request is
     specifically not addressed to them.
 
+    Note about the ISC DHCP server (and possibly other DHCP servers).
+
+    The ISC DHCP server listens on RAW IP sockets bound to the configured ethernet
+    interfaces and filters for IP packets with destination port 67. It also binds
+    to a normal UDP socket on port 67 which is meant for outgoing packets. Any
+    packets that arriove on this interface will be discarded. This means that if you
+    use the [--server](#server) option to point to the DHCP server on the host
+    itself this won't work. The packet goes over the loopback and won't match the
+    RAW packet filter. Instead the packet will arrive on the normal UDP socket
+    and get discarded. What **DOES** work is using any address that will route over
+    an interface the DHCP server listens on. Use this in combination with the
+    [--ttl](#ttl) option to avoid traffic to this address actually arriving
+    (the packet will however still do at least 1 hop)
+
 - -i, --interface _string_
 
     Bind the sending socket to the named interface (e.g. _eth0_). This can be
@@ -219,20 +234,34 @@ Valid options are:
 
     If this option is used the DHCP server will send its responses back to _IP_.
     So if this is not a local IP the program will normally not see the DHCP response
-    so only do that if you have a cunning plan.
+    so only do that if you have a cunning plan (see the EXAMPLE section for these)
 
     Notice that this option is the way you tell a DHCP server to select an address
     from a different subnet than the one with the DHCP server address.
 
     Also notice that this option by default will try to listen on port `67`
-    (unless the [--listen](#listen) option is given) which means you typically
-    can't use this on a host that runs a DHCP server or DHCP relay)
+    which means you typically can't use this on a host that runs a DHCP server or
+    DHCP relay. That is unless the [--listen](#listen) option is given which allows
+    you to wait for responses from another port combined with a cunning plan to
+    make sure responses get to this port (again see the EXAMPLE section)
 
 - --ttl _INT_
 
     Sends the request packets with the given Time to live (hop limit). This is
     a way in which you can avoid a packet from traveling too far. This will
     typically only make sense if you are not doing a broadcast.
+
+- --circuit\_id _STRING_
+
+    Pass the given string as the Circuit ID Sub-option in a Relay Agent Information
+    Option. The Sub-option is not sent if this option is not given. Normally only
+    used in combination with the [gateway](#gateway) option.
+
+- --remote\_id _STRING_
+
+    Pass the given string as the Remote ID Sub-option in a Relay Agent Information
+    Option. The Sub-option is not sent if this option is not given. Normally only
+    used in combination with the [gateway](#gateway) option.
 
 - --fou _ADDRESS_
 
@@ -244,8 +273,12 @@ Valid options are:
     If this option is given the outgoing packet is encapsulated and then sent to
     _ADDRESS_ which is responsible for decapsulating it.
 
-    This option allows the program to send packets that it otherwsie cannot
+    This option allows the program to send packets that it otherwise cannot
     (because the user lacks permission to construct such packets).
+
+    In general avoid this option. It will need IP forwarding, it won't work if the
+    source address is a local IP address amd most (all ?) DHCP servers don't care
+    about the source port of the packet so it isn't needed.
 
 - -l, --listen _ADDRESS_
 
