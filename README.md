@@ -7,7 +7,7 @@ dhcp\_test - Do a test DHCP exchange
 ```
 dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
           [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
-          [-I|--ip <ADDRESS>] [-e|--expect <IP>] [--fou <ADDRESS>]
+          [-I|--ip <ADDRESS>] {-e|--expect <ADDRESS>} [--fou <ADDRESS>]
           [-s|--server <ADDRESS>] [-T|--track] [-i|--interface <string>]
           [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]] [--ttl <INT>]
           [--circuit_id <STRING>] [--remote_id <STRING>]
@@ -130,18 +130,22 @@ Valid options are:
     DHCPOFFER response the value is increased by _1_ (wrapped) and the result is
     used for DHCPREQUEST and DHCPRELEASE.
 
-- -e, --expect _IP_
+- -e, --expect _ADDRESS_
 
     When DHCPDISCOVER requests are broadcast multiple DHCP servers can answer.
     By default the first DHCPOFFER received will be selected to go ahead with.
     If this option is given only a DHCPOFFER from the DHCP server with the given
-    _IP_ will be selected.
+    _ADDRESS_ will be selected.
 
     The sender of the selected DHCPOFFER (irrespective of the value of this option)
     will always be used for DHCP response selection in the following steps.
 
-    All DHCP responses (not just DHCPOFFER) are checked for coming from port 67
-    (irrespective of the value of this option.
+    _ADDRESS_ can be given as _HOST:PORT_ or as just _HOST_ in which case it uses
+    the standard DHCP port (port 67). So by default the source port of incoming
+    packets is also checked. This option can be given multiple times in which case
+    the incoming packet must match at least one of the given addresses. If this
+    option is not given any source address will do but the packet is still checked
+    for coming from port 67.
 
 - -s, --server _ADDRESS_
 

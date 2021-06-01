@@ -619,7 +619,7 @@ sub options_parse {
 }
 
 sub packet_receive {
-    my ($socket, $timeout, $xid, $expect_addr, $mac) = @_;
+    my ($socket, $timeout, $xid, $expect, $mac) = @_;
 
     my $read_mask  = "";
     my $fd = fileno($socket) // die "Not a file descriptor";
@@ -721,7 +721,19 @@ sub packet_receive {
             print "Decapsulated FOU packet from $src:$sprt to $dst:$dprt, LEN=$udp_len\n" if $verbose >= 2;
         }
 
-        $server_port == BOOTPS || next;
+        my $server_packed = pack_sockaddr_in($server_port, $server_addr);
+        if (%$expect) {
+            # Normalize
+            if (!$expect->{$server_packed}) {
+                print("Drop packet from unexpected source\n") if $verbose >= 2;
+                next;
+            }
+        } else {
+            if ($server_port != BOOTPS) {
+                print("Drop packet from unexpected port\n") if $verbose >= 2;
+                next;
+            }
+        }
         my ($op, $hw_type, $hw_len, $hops,
             $reply_xid, $secs, $flags,
             $client_addr, $your_addr, $boot_addr, $gateway_addr,
@@ -741,9 +753,9 @@ sub packet_receive {
                    $verbose >= 2;
         $hw_type == HW_ETHERNET || next;
         $reply_xid == $xid || next;
-        !$expect_addr || $server_addr eq $expect_addr || next;
         my %option = (
-            server_packed => pack_sockaddr_in($server_port, $server_addr),
+            server_packed => $server_packed,
+            expect	=> { $server_packed => 1 },
             server_addr	=> $server_addr,
             server_ip	=> inet_ntoa($server_addr),
             server_port	=> $server_port,
