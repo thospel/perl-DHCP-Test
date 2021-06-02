@@ -8,10 +8,11 @@ dhcp\_test - Do a test DHCP exchange
 dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
           [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
           [-I|--ip <ADDRESS>] {-e|--expect <ADDRESS>} [--fou <ADDRESS>]
-          [-s|--server <ADDRESS>] [-T|--track] [-i|--interface <string>]
-          [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]] [--ttl <INT>]
+          [-f|--from <ADDRESS>] [-s|--server <ADDRESS>] [-T|--track]
+          [-i|--interface <string>] [-b|--broadcast] [-u|--unicast]
+          [-l|--listen <ADDRESS>] [-g|--gateway [<IP>]] [--ttl <INT>]
           [--circuit_id <STRING>] [--remote_id <STRING>]
-          [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
+          [-t|--timeout <FLOAT>] [-r|--retries <INT>]
 dhcp_test [--version] [-U | --unsafe] [-h | --help]
 ```
 
@@ -147,6 +148,14 @@ Valid options are:
     option is not given any source address will do but the packet is still checked
     for coming from port 67.
 
+- -f, --from _ADDRESS_
+
+    Send the DHCP requests from the given _ADDRESS_. If this option is not given
+    the program will select something appropiate by itself.
+
+    _ADDRESS_ can be given as _HOST:PORT_ or as just _HOST_ in which case it
+    selects an appropiate port by itself.
+
 - -s, --server _ADDRESS_
 
     Send DHCP requests to the given _ADDRESS_. If this option is not given it will
@@ -155,7 +164,7 @@ Valid options are:
     _ADDRESS_ can be given as _HOST:PORT_ or as just _HOST_ in which case it uses
     the standard DHCP port (port 67).
 
-    Notice that [--expect](#expect) option may still be needed since since the
+    Notice that the [--expect](#expect) option may still be needed since since the
     answers don't always come from this server _ADDRESS_, e.g, with a multihomed
     DHCP server.
     And there is always a chance that some other DHCP server sends a response which
@@ -169,14 +178,14 @@ Valid options are:
     The ISC DHCP server listens on RAW IP sockets bound to the configured ethernet
     interfaces and filters for IP packets with destination port 67. It also binds
     to a normal UDP socket on port 67 which is meant for outgoing packets. Any
-    packets that arriove on this interface will be discarded. This means that if you
+    packets that arrive on this interface will be discarded. This means that if you
     use the [--server](#server) option to point to the DHCP server on the host
     itself this won't work. The packet goes over the loopback and won't match the
-    RAW packet filter. Instead the packet will arrive on the normal UDP socket
-    and get discarded. What **DOES** work is using any address that will route over
+    RAW packet filter. Instead the packet will arrive on the normal UDP socket and
+    get discarded. What **DOES** work is sending to any address that will route over
     an interface the DHCP server listens on. Use this in combination with the
-    [--ttl](#ttl) option to avoid traffic to this address actually arriving
-    (the packet will however still do at least 1 hop)
+    [--ttl](#ttl) option to avoid traffic to the destination address actually
+    arriving (you cannot however avoid the first hop)
 
 - -i, --interface _string_
 
@@ -210,6 +219,8 @@ Valid options are:
 
     This option controls request packets. So don't confuse this with the
     [--unicast](#unicast) option which controls response packets.
+
+    PS: Sending to _255.255.255.255_ doesn't need this flag.
 
 - -u, --unicast
 

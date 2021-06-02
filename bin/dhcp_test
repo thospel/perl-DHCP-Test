@@ -84,7 +84,7 @@ BEGIN {
 use Getopt::Long 2.24 qw(:config bundling require_order);
 use Socket
     qw(pack_sockaddr_in unpack_sockaddr_in inet_aton inet_ntoa
-       PF_INET SOCK_DGRAM SO_REUSEADDR INADDR_ANY INADDR_BROADCAST);
+       PF_INET SOCK_DGRAM SO_REUSEADDR INADDR_ANY INADDR_BROADCAST IPPROTO_IP);
 use Sys::Hostname qw(hostname);
 
 use DHCP::Test qw($verbose $separator
@@ -127,6 +127,7 @@ eval {
                    "u|unicast!"		=> \my $unicast,
                    "b|broadcast!"	=> \my $broadcast,
                    "T|track!"		=> \my $track,
+                   "f|from=s"		=> \my $send_from,
                    # Do not broadcast but send to specific DHCP server
                    "s|server=s"		=> \my $server_ip,
                    # Only accept answer from specific DHCP server
@@ -186,6 +187,7 @@ EOF
     }
     $broadcast = 1 if !defined $broadcast && !$server_ip;
     my $server_packed = parse_udp_address($server_ip || "255.255.255.255", "server ip", "255.255.255.255", BOOTPS, 1);
+    $send_from = parse_udp_address($send_from, "send from", undef, 0, 1) if defined $send_from;
     $fou = parse_udp_address($fou, "fou receiver", "127.0.0.1") if defined $fou;
     my %agent_info = (
         defined $cid ? (AGENT_CIRCUIT_ID() => $cid) : (),
@@ -208,6 +210,9 @@ EOF
         my $ip = inet_ntoa($addr);
         die "Could not bind to $ip:$port: $^E";
     }
+    # my $IP_TRANSPARENT = 19;
+    # setsockopt($recv, IPPROTO_IP, $IP_TRANSPARENT, 1) ||
+    #     die "Could not setsockopt IP_TRANSPARENT: $^E";
     $recv->blocking(0);
 
     my $options1;
@@ -221,8 +226,8 @@ EOF
             # DISCOVER
             $mac = packet_send(
                 DISCOVER,
-                $fou, $interface, $server_packed, $ttl, $xid, $gateway_ip, $mac,
-                $broadcast, $unicast,
+                $fou, $interface, $send_from, $server_packed, $ttl, $xid,
+                $gateway_ip, $mac, $broadcast, $unicast,
                 defined $hostname ? (hostname => $hostname) : (),
                 $request_ip ? (request_ip => $request_ip) : (),
                 %agent_info ? (agent_info => \%agent_info) : (),
@@ -249,7 +254,7 @@ EOF
             # REQUEST
             my $m = packet_send(
                 $inform ? INFORM : REQUEST,
-                $fou, $interface,
+                $fou, $interface, $send_from,
                 $track && !$inform ? $options1->{server_packed} : $server_packed,
                 $ttl, $xid, $gateway_ip, $mac,
                 $track ? 0 : $broadcast, $unicast,
@@ -293,7 +298,7 @@ EOF
         # RELEASE
         $options2->{your_ip} ne "0.0.0.0" || die "No IP address was assigned";
         packet_send(RELEASE,
-                    $fou, $interface,
+                    $fou, $interface, $send_from,
                     $track ? $options2->{server_packed} : $server_packed,
                     $ttl, $xid, $gateway_ip, $mac,
                     $track ? 0 : $broadcast, $unicast,
@@ -323,10 +328,11 @@ dhcp_test - Do a test DHCP exchange
  dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
            [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
            [-I|--ip <ADDRESS>] {-e|--expect <ADDRESS>} [--fou <ADDRESS>]
-           [-s|--server <ADDRESS>] [-T|--track] [-i|--interface <string>]
-           [-b|--broadcast] [-u|--unicast] [-g|--gateway [<IP>]] [--ttl <INT>]
+           [-f|--from <ADDRESS>] [-s|--server <ADDRESS>] [-T|--track]
+           [-i|--interface <string>] [-b|--broadcast] [-u|--unicast]
+           [-l|--listen <ADDRESS>] [-g|--gateway [<IP>]] [--ttl <INT>]
            [--circuit_id <STRING>] [--remote_id <STRING>]
-           [-l|--listen <ADDRESS>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
+           [-t|--timeout <FLOAT>] [-r|--retries <INT>]
  dhcp_test [--version] [-U | --unsafe] [-h | --help]
 
 =head1 DESCRIPTION
@@ -425,7 +431,7 @@ Something else on your net may also use locally administered MAC addresses
 Also take care when combining MAC placeholders with the L<--keep|/keep> option
 because you may exhaust the DHCP server IP addresses pool.
 
-=item X<xis>--xid I<INT>
+=item X<xid>--xid I<INT>
 
 Use I<INT> as transaction identifier. Can also be given as an I<IP> which is
 then converted to number. If not given an appropiate value is generated
@@ -455,6 +461,14 @@ the incoming packet must match at least one of the given addresses. If this
 option is not given any source address will do but the packet is still checked
 for coming from port 67.
 
+=item X<from>-f, --from I<ADDRESS>
+
+Send the DHCP requests from the given I<ADDRESS>. If this option is not given
+the program will select something appropiate by itself.
+
+I<ADDRESS> can be given as I<HOST:PORT> or as just I<HOST> in which case it
+selects an appropiate port by itself.
+
 =item X<server>-s, --server I<ADDRESS>
 
 Send DHCP requests to the given I<ADDRESS>. If this option is not given it will
@@ -463,7 +477,7 @@ use the broadcast address I<255.255.255.255:67>.
 I<ADDRESS> can be given as I<HOST:PORT> or as just I<HOST> in which case it uses
 the standard DHCP port (port 67).
 
-Notice that L<--expect|/expect> option may still be needed since since the
+Notice that the L<--expect|/expect> option may still be needed since since the
 answers don't always come from this server I<ADDRESS>, e.g, with a multihomed
 DHCP server.
 And there is always a chance that some other DHCP server sends a response which
@@ -477,14 +491,14 @@ Note about the ISC DHCP server (and possibly other DHCP servers).
 The ISC DHCP server listens on RAW IP sockets bound to the configured ethernet
 interfaces and filters for IP packets with destination port 67. It also binds
 to a normal UDP socket on port 67 which is meant for outgoing packets. Any
-packets that arriove on this interface will be discarded. This means that if you
+packets that arrive on this interface will be discarded. This means that if you
 use the L<--server|/server> option to point to the DHCP server on the host
 itself this won't work. The packet goes over the loopback and won't match the
-RAW packet filter. Instead the packet will arrive on the normal UDP socket
-and get discarded. What B<DOES> work is using any address that will route over
+RAW packet filter. Instead the packet will arrive on the normal UDP socket and
+get discarded. What B<DOES> work is sending to any address that will route over
 an interface the DHCP server listens on. Use this in combination with the
-L<--ttl|/ttl> option to avoid traffic to this address actually arriving
-(the packet will however still do at least 1 hop)
+L<--ttl|/ttl> option to avoid traffic to the destination address actually
+arriving (you cannot however avoid the first hop)
 
 =item X<interface>-i, --interface I<string>
 
@@ -518,6 +532,8 @@ server whose DHCPOFFER was selected, so no broadcast flag is needed.
 
 This option controls request packets. So don't confuse this with the
 L<--unicast|/unicast> option which controls response packets.
+
+PS: Sending to I<255.255.255.255> doesn't need this flag.
 
 =item X<unicast>-u, --unicast
 

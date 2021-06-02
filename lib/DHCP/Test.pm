@@ -462,7 +462,7 @@ sub fou {
 }
 
 sub packet_send {
-    my ($type, $fou, $interface, $to, $ttl, $xid, $gateway_ip, $mac,
+    my ($type, $fou, $interface, $send_from, $to, $ttl, $xid, $gateway_ip, $mac,
         $broadcast, $unicast, %options) = @_;
 
     croak "Missing mandatory option 'request_ip'" if
@@ -485,12 +485,22 @@ sub packet_send {
     }
     # setsockopt($sender, SOL_SOCKET, SO_REUSEADDR, 1) ||
     #    die "Could not setsockopt SO_REUSEADDR: $^E";
-    # my $from = pack_sockaddr_in(BOOTPC, INADDR_ANY);
-    # bind($sender, $from) or die "Could not bind: $^E";
-    # my $from = pack_sockaddr_in(0, inet_aton("192.168.59.142"));
-    #bind($sender, $from) or die "Could not bind: $^E";
-    connect($sender, $to) or die "Could not connect: $^E";
-    my $from = getsockname($sender) // die "Could not getsockname: $^E";
+    my $from;
+    if (defined $send_from && $fou) {
+        my ($fport, $from_addr) = unpack_sockaddr_in($send_from);
+        $fport ||= defined $gateway_ip ? BOOTPS: BOOTPC;
+        if ($from_addr eq INADDR_ANY) {
+            connect($sender, $to) or die "Could not connect: $^E";
+            $from = getsockname($sender) // die "Could not getsockname: $^E";
+            (undef, $from_addr) = unpack_sockaddr_in($from);
+        }
+        $from = pack_sockaddr_in($fport, $from_addr);
+    } else {
+        !defined $send_from || bind($sender, $send_from) or
+            die "Could not bind: $^E";
+        connect($sender, $to) or die "Could not connect: $^E";
+        $from = getsockname($sender) // die "Could not getsockname: $^E";
+    }
     my ($fport, $from_addr) = unpack_sockaddr_in($from);
     my $from_ip = inet_ntoa($from_addr);
     $gateway_ip = $from_ip if defined $gateway_ip && $gateway_ip eq "";
@@ -530,7 +540,10 @@ sub packet_send {
                              %options,
                              message_type => $type);
     if ($fou) {
-        fou($fou, $ttl, $gateway_ip ? pack_sockaddr_in(BOOTPS, inet_aton($gateway_ip)) : pack_sockaddr_in(BOOTPC, inet_aton("0.0.0.1")), $to, $buffer);
+        $from = $gateway_ip ?
+            pack_sockaddr_in(BOOTPS, inet_aton($gateway_ip)) :
+            pack_sockaddr_in(BOOTPC, inet_aton("0.0.0.1")) if !$send_from;
+        fou($fou, $ttl, $from, $to, $buffer);
     } else {
         !defined $ttl || setsockopt($sender, IPPROTO_IP, IP_TTL, int($ttl)) ||
             die "Could not set TTL: $^E";
@@ -541,8 +554,9 @@ sub packet_send {
     }
     if ($verbose >= 2) {
         my ($port, $addr) = unpack_sockaddr_in($to);
-        printf("%s\nDHCP%s sent to %s:%d\n",
-               $separator, message_type($type), inet_ntoa($addr), $port);
+        printf("%s\nDHCP%s sent from %s:%d to %s:%d\n",
+               $separator, message_type($type),
+               $from_ip, $fport, inet_ntoa($addr), $port);
     }
     return $mac;
 }
