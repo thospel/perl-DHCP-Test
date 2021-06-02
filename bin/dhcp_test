@@ -10,7 +10,7 @@ On 10.253.0.8
 # Set up FOU tunnel. Notice that we listen on the output port of the tunnel
 modprobe fou
 ip link add name fou1 type ipip remote 127.0.0.1 local 127.0.0.1 ttl 225 encap fou encap-sport auto encap-dport 1236
-ip addr add 10.253.4.1/24 dev fou1
+# ip addr add 10.253.4.1/24 dev fou1
 ip link set fou1 up
 # Decapsulator
 ip fou add port 1237 ipproto 4 local 127.0.0.1
@@ -28,7 +28,7 @@ iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF
 ip rule add fwmark 17 lookup 101
 
 # Route everything in routing plane 101 to the FOU tunnel:
-ip route add default via 10.253.4.1 table 101
+ip route add default dev fou1 table 101
 
 # Experiments with -t nat failed because this implicitely uses tracked
 # connections and all these port 67 to port 67 packets fall into the same
@@ -85,6 +85,7 @@ use Getopt::Long 2.24 qw(:config bundling require_order);
 use Socket
     qw(pack_sockaddr_in unpack_sockaddr_in inet_aton inet_ntoa
        PF_INET SOCK_DGRAM SO_REUSEADDR INADDR_ANY INADDR_BROADCAST IPPROTO_IP);
+use Errno qw(EADDRINUSE);
 use Sys::Hostname qw(hostname);
 
 use DHCP::Test qw($verbose $separator
@@ -95,6 +96,7 @@ use DHCP::Test qw($verbose $separator
                   parse_udp_address packet_send packet_receive message_type
                   string_from_value);
 use DHCP::Test::Package;
+use Time::HiRes qw(time sleep);
 
 $| = 1;
 
@@ -106,6 +108,7 @@ eval {
     my $xid = ($$ % 2**16) << 16 | int(rand 2**15) << 1;
     my $hostname_local = hostname();
     $hostname_local =~ s/\..*//sg;
+    my $listen_timeout = 5;
     my $timeout = 1.5;
     my $retries = 2;
 
@@ -120,6 +123,7 @@ eval {
                    "ttl=o"		=> \my $ttl,
                    "H|hostname:s"	=> \my $hostname,
                    "l|listen=s"		=> \my $listen,
+                   "L|listen_timeout=f"	=> \$listen_timeout,
                    # do DHCP relay request. Answer is on port 67. Not supported yet
                    "g|gateway:s"	=> \my $gateway_ip,
                    "circuit_id=s"	=> \my $cid,
@@ -205,11 +209,23 @@ EOF
         "listen address",
         "0.0.0.0",
         defined $gateway_ip ? BOOTPS : BOOTPC);
-    if (!bind($recv, $from)) {
+    my $start = time();
+    my $n = 0;
+    while (!bind($recv, $from)) {
         my ($port, $addr) = unpack_sockaddr_in($from);
         my $ip = inet_ntoa($addr);
-        die "Could not bind to $ip:$port: $^E";
+        $! == EADDRINUSE || die "Could not bind to $ip:$port: $^E";
+        my $now = time();
+        $start = $now if $now < $start;
+        my $sleep = $start + $listen_timeout - $now;
+        die $n ? "Giving up. Could still" : "Could", " not bind to $ip:$port: $^E" if $sleep <= 0;
+        $sleep = 0.06 + rand 0.04 if $sleep >= 0.1;
+        printf("Could not bind to %s:%d. Some other instance is probably using it. Will try to acquire socket for %.1f more seconds\n",
+               $ip, $port, $listen_timeout) if !$n++ && $verbose >= 2;
+        sleep $sleep;
     }
+    printf("Acquired listening socket after %.1f seconds\n", time() - $start) if
+        $n && $verbose >= 2;
     # my $IP_TRANSPARENT = 19;
     # setsockopt($recv, IPPROTO_IP, $IP_TRANSPARENT, 1) ||
     #     die "Could not setsockopt IP_TRANSPARENT: $^E";
@@ -332,7 +348,7 @@ dhcp_test - Do a test DHCP exchange
            [-i|--interface <string>] [-b|--broadcast] [-u|--unicast]
            [-l|--listen <ADDRESS>] [-g|--gateway [<IP>]] [--ttl <INT>]
            [--circuit_id <STRING>] [--remote_id <STRING>]
-           [-t|--timeout <FLOAT>] [-r|--retries <INT>]
+           [-L|listen_timeout <FLOAT>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
  dhcp_test [--version] [-U | --unsafe] [-h | --help]
 
 =head1 DESCRIPTION
@@ -629,6 +645,13 @@ Packets received on this interface are first checked for FOU encapsulation
 (irrespective of the use of the L<--fou|/fou> option). If they are encapsulated
 the packet is first decapsulated before further processing.
 
+=item X<listen_timeout>-L, --listen_timeout I<FLOAT>
+
+The program opens a socket to listen for server replies. If another instance
+of this program is running it will probably use the same port and the bind will
+fail. This timeout sets for how many second the program will try to acquire a
+listening socket before giving up. Defaults to I<5>.
+
 =item X<timeout>-r, --timeout I<FLOAT>
 
 After sending a DHCP request the program will wait for I<FLOAT> seconds for
@@ -701,7 +724,7 @@ we can set up a FOU tunnel that catches the response:
    # Set up FOU tunnel. Notice that we listen on the output port of the tunnel
    modprobe fou
    ip link add name fou1 type ipip remote 127.0.0.1 local 127.0.0.1 ttl 225 encap fou encap-sport auto encap-dport 1236
-   ip addr add 10.253.4.1/24 dev fou1
+   # ip addr add 10.253.4.1/24 dev fou1
    ip link set fou1 up
    # Decapsulator
    # Remove the "local 127.0.0.1" on older versions of linux
@@ -719,7 +742,7 @@ we can set up a FOU tunnel that catches the response:
    ip rule add fwmark 17 lookup 101
 
    # Route everything in routing plane 101 into the FOU tunnel:
-   ip route add default via 10.253.4.1 table 101
+   ip route add default dev fou1 table 101
 
 =head1 BUGS
 

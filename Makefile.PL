@@ -68,6 +68,7 @@ WriteMakefile
          # We actually only directly use subpackage IO::Interface::Simple
          # but internally that uses IO::Interface anyways
          "IO::Interface"	=> "1.08",
+         "Time::HiRes"		=> "0.01",
      },
      ABSTRACT		=> 'Ton Hospel <DHCP-Test@ton.iguana.be>',
      AUTHOR		=> 'Ton Hospel <ton@>',

@@ -12,7 +12,7 @@ dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
           [-i|--interface <string>] [-b|--broadcast] [-u|--unicast]
           [-l|--listen <ADDRESS>] [-g|--gateway [<IP>]] [--ttl <INT>]
           [--circuit_id <STRING>] [--remote_id <STRING>]
-          [-t|--timeout <FLOAT>] [-r|--retries <INT>]
+          [-L|listen_timeout <FLOAT>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
 dhcp_test [--version] [-U | --unsafe] [-h | --help]
 ```
 
@@ -316,6 +316,13 @@ Valid options are:
     (irrespective of the use of the [--fou](#fou) option). If they are encapsulated
     the packet is first decapsulated before further processing.
 
+- -L, --listen\_timeout _FLOAT_
+
+    The program opens a socket to listen for server replies. If another instance
+    of this program is running it will probably use the same port and the bind will
+    fail. This timeout sets for how many second the program will try to acquire a
+    listening socket before giving up. Defaults to _5_.
+
 - -r, --timeout _FLOAT_
 
     After sending a DHCP request the program will wait for _FLOAT_ seconds for
@@ -401,7 +408,7 @@ we can set up a FOU tunnel that catches the response:
 # Set up FOU tunnel. Notice that we listen on the output port of the tunnel
 modprobe fou
 ip link add name fou1 type ipip remote 127.0.0.1 local 127.0.0.1 ttl 225 encap fou encap-sport auto encap-dport 1236
-ip addr add 10.253.4.1/24 dev fou1
+# ip addr add 10.253.4.1/24 dev fou1
 ip link set fou1 up
 # Decapsulator
 # Remove the "local 127.0.0.1" on older versions of linux
@@ -419,7 +426,7 @@ iptables -t mangle -A OUTPUT -p udp --sport 67 --dport 67 -m u32 --u32 "4&0x1FFF
 ip rule add fwmark 17 lookup 101
 
 # Route everything in routing plane 101 into the FOU tunnel:
-ip route add default via 10.253.4.1 table 101
+ip route add default dev fou1 table 101
 ```
 
 # BUGS
