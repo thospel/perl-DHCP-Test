@@ -633,7 +633,7 @@ sub options_parse {
 }
 
 sub packet_receive {
-    my ($socket, $timeout, $xid, $expect, $mac) = @_;
+    my ($socket, $timeout, $xid, $expect_ip, $expect_id, $mac) = @_;
 
     my $read_mask  = "";
     my $fd = fileno($socket) // die "Not a file descriptor";
@@ -736,9 +736,9 @@ sub packet_receive {
         }
 
         my $server_packed = pack_sockaddr_in($server_port, $server_addr);
-        if (%$expect) {
+        if (%$expect_ip) {
             # Normalize
-            if (!$expect->{$server_packed}) {
+            if (!$expect_ip->{$server_packed}) {
                 print("Drop packet from unexpected source\n") if $verbose >= 2;
                 next;
             }
@@ -769,7 +769,7 @@ sub packet_receive {
         $reply_xid == $xid || next;
         my %option = (
             server_packed => $server_packed,
-            expect	=> { $server_packed => 1 },
+            expect_ip	=> { $server_packed => 1 },
             server_addr	=> $server_addr,
             server_ip	=> inet_ntoa($server_addr),
             server_port	=> $server_port,
@@ -825,13 +825,18 @@ EOF
         }
         exists $option{message_type} || die "No reply message type";
         if (exists $option{server}) {
-            $option{server} eq $server_addr ||
-                die sprintf("Inconsistent server: Received packet from %s but server identifier in packet is %s", $server_ip, inet_ntoa($option{server}));
+            if (%$expect_id) {
+                $expect_id->{$option{server}} ||
+                    die sprintf("Inconsistent server: Received packet with server identifier '%s' which does not match any --expect_id value", inet_ntoa($option{server}));
+            } elsif ($option{server} ne $server_addr) {
+                die sprintf("Inconsistent server: Received packet from '%s' but server identifier in packet is '%s'", $server_ip, inet_ntoa($option{server}));
+            }
         } elsif ($option{message_type} == NAK) {
             $option{server} = $server_addr;
         } else {
             die "Missing server identifier in DHCP reply";
         }
+        $option{expect_id} = { $option{server} => 1 };
 
         # On my net the router can send a NAK even though the router does
         # not mot match the server identifier. So we should do a perl "next" if

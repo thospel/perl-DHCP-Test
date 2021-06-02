@@ -7,11 +7,11 @@ dhcp\_test - Do a test DHCP exchange
 ```
 dhcp_test [-v|--verbose] [-N|--nagios] [-R|--request] [-k|--keep] [--inform]
           [-m|-mac [<string>]] [--xid <INT>][-H|--hostname [<string>]]
-          [-I|--ip <ADDRESS>] {-e|--expect <ADDRESS>} [--fou <ADDRESS>]
-          [-f|--from <ADDRESS>] [-s|--server <ADDRESS>] [-T|--track]
+          [-I|--ip <ADDRESS>] {-e|--expect_ip <ADDRESS>} {-E|--expect_id <IP>}
+          [--fou <ADDRESS>] [-f|--from <ADDRESS>] [-s|--server <ADDRESS>]
           [-i|--interface <string>] [-b|--broadcast] [-u|--unicast]
           [-l|--listen <ADDRESS>] [-g|--gateway [<IP>]] [--ttl <INT>]
-          [--circuit_id <STRING>] [--remote_id <STRING>]
+          [-T|--track] [--circuit_id <STRING>] [--remote_id <STRING>]
           [-L|listen_timeout <FLOAT>] [-t|--timeout <FLOAT>] [-r|--retries <INT>]
 dhcp_test [--version] [-U | --unsafe] [-h | --help]
 ```
@@ -131,15 +131,18 @@ Valid options are:
     DHCPOFFER response the value is increased by _1_ (wrapped) and the result is
     used for DHCPREQUEST and DHCPRELEASE.
 
-- -e, --expect _ADDRESS_
+- -e, --expect\_ip _ADDRESS_
 
     When DHCPDISCOVER requests are broadcast multiple DHCP servers can answer.
     By default the first DHCPOFFER received will be selected to go ahead with.
-    If this option is given only a DHCPOFFER from the DHCP server with the given
-    _ADDRESS_ will be selected.
+    If this option is given only a DHCPOFFER from the DHCP server sending from the
+    given _ADDRESS_ will be selected
 
-    The sender of the selected DHCPOFFER (irrespective of the value of this option)
-    will always be used for DHCP response selection in the following steps.
+    This option can be given multiple times in which case the reply packet is
+    accepted if it matches any of the _ADDRESS_ values.
+
+    The sender of the selected DHCPOFFER will always be used for DHCP response
+    selection in the following steps, any values of this option are ignored.
 
     _ADDRESS_ can be given as _HOST:PORT_ or as just _HOST_ in which case it uses
     the standard DHCP port (port 67). So by default the source port of incoming
@@ -147,6 +150,29 @@ Valid options are:
     the incoming packet must match at least one of the given addresses. If this
     option is not given any source address will do but the packet is still checked
     for coming from port 67.
+
+    Don't confuse this option with the [--exoect\_id](#expect_id) option. This
+    option is about the source IP of the reply packet, not about the packet content.
+
+- -E, --expect\_id _IP_
+
+    The DHCPOFFER reply packet can contain DHCP option 54, DHCP Server identifier.
+    The value of this DHCP option must match one of the _IP_s passed using this
+    program option If the DHCPOFFER reply packet does not contain this mandatory
+    option the program dies with an error.
+
+    The program option can be given multiple times. In that case the
+    DHCP Server identifier must match any one of them.
+
+    If this program option is not given the packet source IP is used instead.
+
+    The DHCP Server identifier of the selected DHCPOFFER will always be used for
+    DHCP response selection in the following steps, any values of this program
+    option are ignored.
+
+    Don't confuse this program option with the [--exoect\_ip](#expect_ip) option.
+    This option is about somethjing in the packet content, not about the packet
+    source IP.
 
 - -f, --from _ADDRESS_
 
@@ -164,9 +190,9 @@ Valid options are:
     _ADDRESS_ can be given as _HOST:PORT_ or as just _HOST_ in which case it uses
     the standard DHCP port (port 67).
 
-    Notice that the [--expect](#expect) option may still be needed since since the
-    answers don't always come from this server _ADDRESS_, e.g, with a multihomed
-    DHCP server.
+    Notice that the [--expect\_ip](#expect_ip) option may still be needed since since
+    the answers don't always come from this server _ADDRESS_, e.g, with a
+    multihomed DHCP server.
     And there is always a chance that some other DHCP server sends a response which
     just happens to match all relevant properties (mostly MAC address and
     transaction ID). This is less theoretical than it may seem because some DHCP
