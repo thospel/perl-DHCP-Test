@@ -739,12 +739,12 @@ sub packet_receive {
         if (%$expect_ip) {
             # Normalize
             if (!$expect_ip->{$server_packed}) {
-                print("Drop packet from unexpected source\n") if $verbose >= 2;
+                printf("Drop packet from unexpected source '%s:%d'\n", $server_ip, $server_port) if $verbose >= 2;
                 next;
             }
         } else {
             if ($server_port != BOOTPS) {
-                print("Drop packet from unexpected port\n") if $verbose >= 2;
+                printf("Drop packet from unexpected port %d\n", $server_port) if $verbose >= 2;
                 next;
             }
         }
