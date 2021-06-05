@@ -239,6 +239,8 @@ EOF
     if ($inform) {
         $options1 = {
             your_ip	=> $request_ip || "0.0.0.0",
+            expect_ip	=> \%expect_ip,
+            expect_id	=> \%expect_id,
         };
         $keep //= 1;
     } else {
@@ -293,7 +295,8 @@ EOF
             print "DHCPACK receive timed out\n" if $verbose >= 2;
         }
         if (!$options2) {
-            print $nagios ? "CRITICAL - " : "", "Max DHCPREQUEST retries reached\n";
+            print($nagios ? "CRITICAL - " : "", "Max DHCP",
+                  $inform ? "INFORM" : "REQUEST", " retries reached\n");
             exit 2;
         }
         if ($options2->{message_type} != ACK) {
@@ -653,8 +656,10 @@ This option allows the program to send packets that it otherwise cannot
 (because the user lacks permission to construct such packets).
 
 In general avoid this option. It will need IP forwarding, it won't work if the
-source address is a local IP address amd most (all ?) DHCP servers don't care
-about the source port of the packet so it isn't needed.
+source address is a local IP address, it doesnt work for broadcast, you often
+can't send to a local DHCP server (the packet will come out on the loopback
+interface where the server doesn't listen). And to add insult to injury, it
+isn't needed because most (all ?) DHCP servers don't care about the IP source.
 
 =item X<listen>-l, --listen I<ADDRESS>
 

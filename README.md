@@ -318,8 +318,10 @@ Valid options are:
     (because the user lacks permission to construct such packets).
 
     In general avoid this option. It will need IP forwarding, it won't work if the
-    source address is a local IP address amd most (all ?) DHCP servers don't care
-    about the source port of the packet so it isn't needed.
+    source address is a local IP address, it doesnt work for broadcast, you often
+    can't send to a local DHCP server (the packet will come out on the loopback
+    interface where the server doesn't listen). And to add insult to injury, it
+    isn't needed because most (all ?) DHCP servers don't care about the IP source.
 
 - -l, --listen _ADDRESS_
 

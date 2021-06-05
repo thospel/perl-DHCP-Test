@@ -736,7 +736,7 @@ sub packet_receive {
         }
 
         my $server_packed = pack_sockaddr_in($server_port, $server_addr);
-        if (%$expect_ip) {
+        if ($expect_ip && %$expect_ip) {
             # Normalize
             if (!$expect_ip->{$server_packed}) {
                 printf("Drop packet from unexpected source '%s:%d'\n", $server_ip, $server_port) if $verbose >= 2;
@@ -825,7 +825,7 @@ EOF
         }
         exists $option{message_type} || die "No reply message type";
         if (exists $option{server}) {
-            if (%$expect_id) {
+            if ($expect_id && %$expect_id) {
                 $expect_id->{$option{server}} ||
                     die sprintf("Inconsistent server: Received packet with server identifier '%s' which does not match any --expect_id value", inet_ntoa($option{server}));
             } elsif ($option{server} ne $server_addr) {
